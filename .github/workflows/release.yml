@@ -1,0 +1,113 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  # ── Create the GitHub Release first ─────────────────────────────────────────
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          name: Streamlined ${{ github.ref_name }}
+          body: |
+            ## Streamlined ${{ github.ref_name }}
+
+            ### Android
+            1. Download **Streamlined.apk**
+            2. On your phone → **Settings → Security → Install unknown apps** → allow your browser or Files app
+            3. Open the downloaded APK and tap **Install**
+
+            ### Windows
+            1. Download **Streamlined_x64-setup.exe**
+            2. Windows may show a SmartScreen warning — click **More info → Run anyway**
+            3. Streamlined will install and open automatically
+
+            ### iPhone / iPad / Mac
+            Visit **https://streamlined-3bu.pages.dev** in Safari and tap **Share → Add to Home Screen**
+
+            ---
+            🔒 Files are transferred peer-to-peer with AES-256-GCM encryption. Nothing touches our servers. No account needed.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Android APK (Capacitor + Gradle) ────────────────────────────────────────
+  android:
+    needs: create-release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build web assets
+        run: npm run build
+
+      - name: Sync Capacitor
+        run: npx cap sync android
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Write android/local.properties
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" > android/local.properties
+
+      - name: Decode signing keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/streamlined.keystore
+
+      - name: Make gradlew executable
+        run: chmod +x android/gradlew
+
+      - name: Build release APK
+        working-directory: android
+        run: ./gradlew assembleRelease
+        env:
+          STORE_FILE: streamlined.keystore
+          STORE_PASSWORD: ${{ secrets.KEYSTORE_PASS }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASS }}
+
+      - name: Rename APK
+        run: mv android/app/build/outputs/apk/release/app-release.apk Streamlined.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: Streamlined.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Windows installer (Tauri v2) ─────────────────────────────────────────────
+  windows:
+    needs: create-release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Streamlined ${{ github.ref_name }}'
+          releaseDraft: false
+          prerelease: false

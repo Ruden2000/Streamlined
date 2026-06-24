@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Privacy Policy — Streamlined</title>
+  <style>
+    :root {
+      --bg: #f4f6fb;
+      --surface: #ffffff;
+      --primary: #4f46e5;
+      --text: #1e1e2e;
+      --muted: #64748b;
+      --border: #e2e8f0;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1729;
+        --surface: #1a2540;
+        --text: #e8eaf0;
+        --muted: #94a3b8;
+        --border: #2d3a55;
+      }
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.7;
+    }
+    header {
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 1rem 2rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+    header img { height: 32px; width: 32px; border-radius: 6px; }
+    header a { text-decoration: none; color: var(--primary); font-weight: 600; font-size: 1.1rem; }
+    main {
+      max-width: 760px;
+      margin: 0 auto;
+      padding: 3rem 1.5rem 5rem;
+    }
+    h1 { font-size: 2rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .subtitle { color: var(--muted); margin-bottom: 2.5rem; font-size: 0.95rem; }
+    h2 { font-size: 1.2rem; font-weight: 600; margin: 2rem 0 0.5rem; color: var(--primary); }
+    p { margin-bottom: 0.75rem; color: var(--text); }
+    ul { padding-left: 1.5rem; margin-bottom: 0.75rem; }
+    li { margin-bottom: 0.3rem; }
+    a { color: var(--primary); }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1.5rem 2rem;
+      margin-bottom: 1rem;
+    }
+    footer {
+      text-align: center;
+      color: var(--muted);
+      font-size: 0.85rem;
+      padding: 2rem;
+      border-top: 1px solid var(--border);
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="pwa-192.png" alt="Streamlined logo" />
+    <a href="./">Streamlined</a>
+  </header>
+
+  <main>
+    <h1>Privacy Policy</h1>
+    <p class="subtitle">Last updated: June 24, 2026</p>
+
+    <div class="card">
+      <p><strong>Short version:</strong> Streamlined transfers your files directly between your devices using end-to-end encryption. Your files never touch our servers. We collect no personal data, require no account, and store nothing about you.</p>
+    </div>
+
+    <h2>1. Who We Are</h2>
+    <p>Streamlined is a file-transfer application operated as an independent service. For questions, contact us at <a href="mailto:ray.yabardental@gmail.com">ray.yabardental@gmail.com</a>.</p>
+
+    <h2>2. What Data We Collect</h2>
+    <p>Streamlined is designed to collect as little data as possible.</p>
+    <ul>
+      <li><strong>No account required.</strong> We never ask for your name, email, or any identifying information.</li>
+      <li><strong>No file content.</strong> Files are transferred peer-to-peer over an encrypted WebRTC connection. File bytes are never transmitted to or stored on our servers.</li>
+      <li><strong>Ephemeral signaling data.</strong> To connect two devices, our signaling server briefly holds a randomly generated room ID and anonymous device ID (not linked to you). These are discarded as soon as the connection is established, typically within seconds.</li>
+      <li><strong>Local-only history.</strong> Transfer history is stored on your device only, using your browser's local storage. We cannot access it.</li>
+    </ul>
+
+    <h2>3. Encryption</h2>
+    <p>All file transfers are protected with AES-256-GCM encryption. The encryption key is derived from your 6-digit pairing code on your device using PBKDF2 and is never transmitted to any server. Only devices that know the pairing code can decrypt the data.</p>
+
+    <h2>4. TURN Relay Servers</h2>
+    <p>In some network environments (e.g., behind strict firewalls), file data may briefly route through a TURN relay server to establish the peer connection. When this occurs, the data is encrypted end-to-end and the relay server cannot read the file contents. Relay usage is determined automatically by your network and is not logged.</p>
+
+    <h2>5. Content Safety</h2>
+    <p>Streamlined performs client-side scanning of file content on your device before any transfer to detect and block illegal content (including child sexual abuse material). This scanning happens entirely on your device; no scan results or file content are sent to our servers.</p>
+
+    <h2>6. Cookies and Tracking</h2>
+    <p>Streamlined does not use cookies, tracking pixels, analytics, or any third-party advertising technology. We do not track your usage of the application.</p>
+
+    <h2>7. Third-Party Services</h2>
+    <p>Streamlined uses the following third-party infrastructure:</p>
+    <ul>
+      <li><strong>Cloudflare</strong> — hosts the signaling server and CDN. Cloudflare's standard network logs (IP address, request path) may apply per <a href="https://www.cloudflare.com/privacypolicy/" target="_blank" rel="noopener">Cloudflare's Privacy Policy</a>. We do not have access to these logs.</li>
+    </ul>
+
+    <h2>8. Children's Privacy</h2>
+    <p>Streamlined is not directed at children under 13. We do not knowingly collect information from children. If you believe a child has used the service in a way that raises a concern, contact us at <a href="mailto:ray.yabardental@gmail.com">ray.yabardental@gmail.com</a>.</p>
+
+    <h2>9. Data Retention and Deletion</h2>
+    <p>Since we store no personal data on our servers, there is nothing to delete. Local transfer history stored in your browser can be cleared at any time from the app's Settings page or through your browser's local storage settings.</p>
+
+    <h2>10. Security</h2>
+    <p>We employ industry-standard security practices including end-to-end encryption, ephemeral signaling credentials, and no persistent user data. However, no system is perfectly secure. If you discover a security vulnerability, please disclose it responsibly to <a href="mailto:ray.yabardental@gmail.com">ray.yabardental@gmail.com</a>.</p>
+
+    <h2>11. Changes to This Policy</h2>
+    <p>We may update this Privacy Policy from time to time. The "Last updated" date at the top will reflect any changes. Continued use of Streamlined after changes constitutes acceptance of the updated policy.</p>
+
+    <h2>12. Contact</h2>
+    <p>Questions or concerns? Email us at <a href="mailto:ray.yabardental@gmail.com">ray.yabardental@gmail.com</a>.</p>
+  </main>
+
+  <footer>
+    &copy; 2026 Streamlined &mdash; <a href="./privacy.html">Privacy Policy</a> &middot; <a href="./terms.html">Terms of Service</a>
+  </footer>
+</body>
+</html>

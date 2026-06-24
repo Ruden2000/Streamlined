@@ -1,0 +1,13 @@
+name = "streamlined-signaling"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# Each pairing room is one Durable Object instance.
+[[durable_objects.bindings]]
+name = "SIGNALING_ROOM"
+class_name = "SignalingRoom"
+
+# SQLite-backed DO class => eligible for the Workers free plan.
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SignalingRoom"]

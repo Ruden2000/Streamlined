@@ -1,0 +1,29 @@
+{
+  "name": "streamlined",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Fast, private, end-to-end-encrypted file transfer.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "signal": "node server/signaling.js",
+    "sync": "npm run build && cap sync",
+    "android": "npm run build && cap sync android && cap open android",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
+    "vite": "^5.4.0",
+    "wrangler": "^4.95.0",
+    "ws": "^8.18.0"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.3.4",
+    "@capacitor/cli": "^8.3.4",
+    "@capacitor/core": "^8.3.4",
+    "@tauri-apps/api": "^2.11.0"
+  }
+}

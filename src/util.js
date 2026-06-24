@@ -1,0 +1,17 @@
+/* ====================================================================
+   util.js — DOM, formatting, and encoding helpers (no app dependencies)
+   ==================================================================== */
+
+/* ---------- tiny DOM helpers ---------- */
+export const $  = (s, r = document) => r.querySelector(s);
+export const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+export const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
+export const fmtBytes = (b) => { if (b < 1024) return b + " B"; const u = ["KB","MB","GB","TB"]; let i = -1; do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1); return b.toFixed(b < 10 ? 1 : 0) + " " + u[i]; };
+export const fmtTime = (t) => { const d = new Date(t), now = Date.now(); const diff = (now - t) / 1000; if (diff < 60) return "just now"; if (diff < 3600) return Math.floor(diff/60) + "m ago"; if (diff < 86400) return Math.floor(diff/3600) + "h ago"; return d.toLocaleDateString(); };
+export const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36));
+export function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+
+/* ---------- base64 <-> bytes ---------- */
+export function bytesToB64(u8) { let s = ""; const CH = 0x8000; for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); return btoa(s); }
+export function b64ToBytes(b64) { const s = atob(b64); const u8 = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i); return u8; }
+export function blobToB64(blob) { return new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.readAsDataURL(blob); }); }

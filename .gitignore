@@ -1,0 +1,33 @@
+# dependencies / build output
+node_modules/
+dist/
+*.log
+
+# Capacitor / Android (commit the project, ignore build artifacts)
+android/app/build/
+android/build/
+android/.gradle/
+.gradle/
+android/local.properties
+android/app/release/
+android/capacitor-cordova-android-plugins/
+
+# Tauri (commit src-tauri/, ignore Rust build output)
+src-tauri/target/
+
+# Cloudflare / wrangler
+.wrangler/
+
+# secrets / env
+.env
+.env.local
+.env.*.local
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Claude Code internal
+.claude/
