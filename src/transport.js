@@ -41,6 +41,9 @@ class BaseTransport {
     this.onMessage(msg);
   }
   bufferedAmount() { return 0; }
+  // Default: a broadcast notify is just a normal broadcast (BroadcastChannel
+  // backend). WebRTCTransport overrides this to also cross the signaling socket.
+  notifyAll(msg) { this.send(msg); }
 }
 
 /* -------------------- BroadcastChannel (same browser) -------------------- */
@@ -116,6 +119,7 @@ export class WebRTCTransport extends BaseTransport {
     else if (m.type === "signal") { this._handleSignal(m.from, m.data); }
     else if (m.type === "peer-left") { this._closePeer(m.id); }
     else if (m.type === "full") { console.warn("[transport] room full"); }
+    else if (m.type === "notify") { this._deliver(m); }  // Worker-relayed; _mid de-dupes vs the P2P copy
     // "peer-joined" is informational; the newcomer initiates, so we wait.
   }
 
@@ -192,6 +196,17 @@ export class WebRTCTransport extends BaseTransport {
     const data = JSON.stringify(msg);
     if (msg._to) { const p = this.peers.get(msg._to); if (p && p.open) p.dc.send(data); }
     else for (const p of this.peers.values()) if (p.open) p.dc.send(data);
+  }
+
+  // Broadcast a message over P2P AND the signaling socket (one stamp, so the
+  // Worker-relayed copy de-dupes against the P2P copy by _mid). The signaling
+  // path is what reaches other devices' minimal background helpers.
+  notifyAll(msg) {
+    if (this.fallback) return this.fallback.send(msg);
+    this._stamp(msg);
+    const data = JSON.stringify(msg);
+    for (const p of this.peers.values()) if (p.open) p.dc.send(data);
+    if (this.ws && this.ws.readyState === this.ws.OPEN) this.ws.send(data);
   }
 
   bufferedAmount(peerId) {

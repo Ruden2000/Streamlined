@@ -77,6 +77,7 @@ const Transport = {
     this.active.start();
   },
   send(msg) { if (this.active) this.active.send(msg); },
+  notifyAll(msg) { if (this.active) this.active.notifyAll(msg); },
   bufferedAmount(peerId) { return this.active ? this.active.bufferedAmount(peerId) : 0; },
   stop() { if (this.active) { this.active.stop(); this.active = null; } }
 };
@@ -215,9 +216,10 @@ async function sendOneFile(file, targetId) {
   if (!targets.length) { toast("warn", "No recipients", "No available devices to receive."); return; }
 
   // Tell every paired device a file is entering the network so they can surface
-  // a notification. Broadcast (no _to); the transport drops our own echo, so the
-  // sender is never notified. Recipients still get the targeted "offer" below.
-  Transport.send({ type: "notify", name: file.name, size: file.size, mime: file.type || "application/octet-stream", fromName: state.device.name });
+  // a notification. notifyAll crosses both P2P and the signaling socket, so even
+  // a device sitting in its minimal tray helper (no P2P) gets alerted. The
+  // transport drops our own echo, so the sender is never notified.
+  Transport.notifyAll({ type: "notify", name: file.name, size: file.size, mime: file.type || "application/octet-stream", fromName: state.device.name });
 
   for (const to of targets) {
     const tid = uid();

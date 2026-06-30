@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { createTransport, BroadcastTransport } from "../src/transport.js";
+import { createTransport, BroadcastTransport, WebRTCTransport } from "../src/transport.js";
 
 const make = (onMessage = () => {}) =>
   new BroadcastTransport({ selfId: "self", room: "r", onMessage });
@@ -55,5 +55,17 @@ describe("message envelope (_stamp / _deliver)", () => {
     t._deliver({ type: "x", _from: "other", _to: "someone-else" }); // not for us
     t._deliver({ type: "y", _from: "other", _to: "self" });         // for us
     expect(got.map((m) => m.type)).toEqual(["y"]);
+  });
+});
+
+describe("WebRTC notify relay", () => {
+  it("delivers a Worker-relayed notify and de-dupes against the P2P copy by _mid", () => {
+    const got = [];
+    const t = new WebRTCTransport({ selfId: "self", room: "r", signalingUrl: "ws://x", onMessage: (m) => got.push(m) });
+    const relayed = { type: "notify", _from: "other", _mid: "mid-1", name: "report.pdf" };
+    t._onSignal(relayed);            // arrives via the signaling socket
+    t._onSignal({ ...relayed });     // same _mid arrives again via P2P
+    expect(got).toHaveLength(1);
+    expect(got[0].name).toBe("report.pdf");
   });
 });

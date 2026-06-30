@@ -69,6 +69,12 @@ wss.on("connection", (ws) => {
       if (!room) return;
       const target = room.get(m.to);
       if (target) send(target, { type: "signal", from: ws.id, data: m.data });
+    } else if (m.type === "notify") {
+      // Mirror the Worker: fan out the lightweight "incoming file" notice to
+      // every other member so background helpers can show a native notification.
+      const room = rooms.get(ws.room);
+      if (!room) return;
+      for (const [pid, pws] of room) if (pid !== ws.id) send(pws, m);
     }
   });
 

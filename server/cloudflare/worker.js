@@ -60,6 +60,14 @@ export class SignalingRoom {
       const att = ws.deserializeAttachment() || {};
       const target = this._byId(m.to);
       if (target) this._send(target, { type: "signal", from: att.id, data: m.data });
+    } else if (m.type === "notify") {
+      // Fan out a lightweight "incoming file" notice to every other member.
+      // This is the ONLY app-level message the server relays (no file bytes):
+      // it lets a device's minimal background helper — which holds just this
+      // socket, not a P2P connection — surface a native notification. Connected
+      // webviews also receive their own P2P copy and de-dupe by _mid.
+      const att = ws.deserializeAttachment() || {};
+      for (const pid of this._ids(att.id)) { const t = this._byId(pid); if (t) this._send(t, m); }
     }
   }
 
