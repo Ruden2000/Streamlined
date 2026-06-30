@@ -266,6 +266,17 @@ input[type="range"] { width: 130px; accent-color: var(--accent); }
 .incident ul { margin: 8px 0 0; padding-left: 18px; font-size: 13px; color: var(--text); }
 .incident .i-sub { font-size: 12px; color: var(--text-muted); margin-top: 6px; }
 
+/* ---- visible keyboard focus (WCAG 2.4.7) ----
+   :where() keeps specificity at 0 so component styles are untouched; only a
+   focus ring is added, and only for keyboard focus (not mouse clicks). */
+:where(button, a, select, input, [role="button"], [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.dropzone:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-color: var(--accent); }
+/* the switch's real checkbox is visually hidden (0×0), so ring its slider instead */
+.switch input:focus-visible + .slider { outline: 2px solid var(--accent); outline-offset: 2px; }
+
 .notice { font-size: 12px; color: var(--text-muted); margin-top: 12px; line-height: 1.5; }
 .warnbar { display: none; background: var(--danger-soft); border: 1px solid color-mix(in srgb, var(--danger) 30%, var(--border)); color: var(--danger); padding: 12px 14px; border-radius: 12px; margin-bottom: 16px; font-size: 13px; font-weight: 600; }
 .warnbar.show { display: block; }
