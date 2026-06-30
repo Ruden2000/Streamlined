@@ -1,30 +1,54 @@
 /* ====================================================================
    worker.js — Streamlined signaling on Cloudflare Workers + Durable Objects
    --------------------------------------------------------------------
-   Production port of server/signaling.js. A plain Worker can't hold
-   WebSocket state across peers, so each pairing "room" maps to one
-   Durable Object instance (single-threaded, keyed by the hashed pairing
-   code) that relays SDP/ICE between members. File bytes NEVER pass
-   through here — they go peer-to-peer over the encrypted DataChannel.
+   Each pairing "room" maps to one Durable Object (keyed by the hashed
+   pairing code) that relays SDP/ICE + the lightweight "notify" notice.
+   File bytes NEVER pass through here — they go peer-to-peer over the
+   encrypted DataChannel.
 
-   The room id arrives as ?room=<id> on the WebSocket URL so the Worker
-   can route to the right DO before the socket is accepted. Identity
-   (device id) arrives in the {type:"join"} message — identical protocol
-   to the Node dev server, so src/transport.js is unchanged by which one
-   it talks to.
-
-   Uses the WebSocket Hibernation API + a SQLite-backed DO class so it
-   runs on the Workers free plan. Deploy: see README.md in this folder.
+   The DO also stores Web Push subscriptions (SQLite) so a closed PWA can be
+   woken with a payloadless push when a file arrives; the device's service
+   worker then calls /last-notify to show the filename.
    ==================================================================== */
+import { buildVapidJwt, vapidAuthHeader, audienceFor } from "./vapid.js";
 
 const MAX_ROOM = 6;
+const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type" };
+function json(obj, extra) { return new Response(JSON.stringify(obj), { headers: { "content-type": "application/json", ...CORS, ...(extra || {}) } }); }
 
 export class SignalingRoom {
-  constructor(state) {
+  constructor(state, env) {
     this.state = state;
+    this.env = env;
+    this.state.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS subs (endpoint TEXT PRIMARY KEY, device_id TEXT, sub TEXT)"
+    );
   }
 
   async fetch(request) {
+    const url = new URL(request.url);
+
+    if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+
+    // Register / refresh a Web Push subscription for this room.
+    if (url.pathname === "/subscribe" && request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      if (!body || !body.subscription || !body.subscription.endpoint) return json({ ok: false }, { status: 400 });
+      this.state.storage.sql.exec(
+        "INSERT OR REPLACE INTO subs(endpoint, device_id, sub) VALUES (?,?,?)",
+        body.subscription.endpoint,
+        String(body.deviceId || ""),
+        JSON.stringify(body.subscription)
+      );
+      return json({ ok: true });
+    }
+
+    // The service worker fetches the last file name to show in its notification.
+    if (url.pathname === "/last-notify" && request.method === "GET") {
+      const last = (await this.state.storage.get("lastNotify")) || {};
+      return json(last);
+    }
+
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("expected websocket", { status: 426 });
     }
@@ -61,13 +85,36 @@ export class SignalingRoom {
       const target = this._byId(m.to);
       if (target) this._send(target, { type: "signal", from: att.id, data: m.data });
     } else if (m.type === "notify") {
-      // Fan out a lightweight "incoming file" notice to every other member.
-      // This is the ONLY app-level message the server relays (no file bytes):
-      // it lets a device's minimal background helper — which holds just this
-      // socket, not a P2P connection — surface a native notification. Connected
-      // webviews also receive their own P2P copy and de-dupe by _mid.
+      // Fan out to live members, remember the filename for the SW to fetch,
+      // and Web-Push any subscribed devices that aren't currently connected.
       const att = ws.deserializeAttachment() || {};
       for (const pid of this._ids(att.id)) { const t = this._byId(pid); if (t) this._send(t, m); }
+      await this.state.storage.put("lastNotify", { name: m.name, fromName: m.fromName, ts: Date.now() });
+      await this._pushToSubs(att.id, this._ids(att.id));
+    }
+  }
+
+  // Send a payloadless Web Push to every subscribed device except the sender
+  // and devices already live on a socket (they got the in-band notify).
+  async _pushToSubs(senderId, liveIds) {
+    if (!this.env.VAPID_PRIVATE || !this.env.VAPID_PUBLIC) return;
+    const live = new Set([senderId, ...liveIds]);
+    const rows = this.state.storage.sql.exec("SELECT endpoint, device_id, sub FROM subs").toArray();
+    const subject = this.env.VAPID_SUBJECT || "mailto:ray.yabardental@gmail.com";
+    for (const row of rows) {
+      if (live.has(row.device_id)) continue;
+      let sub;
+      try { sub = JSON.parse(row.sub); } catch { continue; }
+      try {
+        const jwt = await buildVapidJwt(this.env.VAPID_PRIVATE, audienceFor(sub.endpoint), subject);
+        const res = await fetch(sub.endpoint, {
+          method: "POST",
+          headers: { Authorization: vapidAuthHeader(jwt, this.env.VAPID_PUBLIC), TTL: "86400" }
+        });
+        if (res.status === 404 || res.status === 410) {
+          this.state.storage.sql.exec("DELETE FROM subs WHERE endpoint = ?", row.endpoint);
+        }
+      } catch { /* skip this endpoint */ }
     }
   }
 
@@ -85,9 +132,7 @@ const STUN = [
   { urls: "stun:stun.l.google.com:19302" }
 ];
 
-/* GET /turn -> short-lived ICE servers (STUN + Cloudflare TURN if configured).
-   The TURN secret lives only here as a Worker secret; clients never see it.
-   Set secrets:  wrangler secret put TURN_TOKEN_ID  /  TURN_API_TOKEN  */
+/* GET /turn -> short-lived ICE servers (STUN + Cloudflare TURN if configured). */
 async function handleTurn(env) {
   const headers = { "content-type": "application/json", "access-control-allow-origin": "*" };
   if (!env.TURN_TOKEN_ID || !env.TURN_API_TOKEN) {
@@ -116,6 +161,14 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/turn") return handleTurn(env);
+
+    // Push subscription endpoints are routed to the room's Durable Object.
+    if (url.pathname === "/subscribe" || url.pathname === "/last-notify") {
+      const room = url.searchParams.get("room") || "default";
+      const stub = env.SIGNALING_ROOM.get(env.SIGNALING_ROOM.idFromName(room));
+      return stub.fetch(request);
+    }
+
     if (request.headers.get("Upgrade") !== "websocket") {
       return new Response("Streamlined signaling worker — connect via WebSocket with ?room=<id>", {
         status: 200, headers: { "content-type": "text/plain" }

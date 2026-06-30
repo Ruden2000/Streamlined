@@ -37,3 +37,27 @@ jobs:
       - name: Compile Tauri shell
         working-directory: src-tauri
         run: cargo build
+
+  # Compile the Android APK (unsigned debug) so the Capacitor project + plugins
+  # are validated on every push without needing the signing secrets.
+  android-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+      - run: npm ci
+      - run: npm run build
+      - run: npx cap sync android
+      - name: Assemble debug APK
+        working-directory: android
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          chmod +x gradlew
+          ./gradlew assembleDebug

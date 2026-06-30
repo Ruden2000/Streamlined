@@ -17,6 +17,11 @@ export const UPDATE_CONFIG = {
   releasesApi: "https://api.github.com/repos/Ruden2000/Streamlined/releases"
 };
 
+// VAPID public key for Web Push (closed-app notifications on PWA installs,
+// including iOS 16.4+ home-screen apps). The matching private key lives ONLY as
+// a Worker secret (VAPID_PRIVATE). Safe to ship publicly — it's the server id.
+export const VAPID_PUBLIC = "BCvoofClfzLCLp9Nezbfo3vyPnm8Bv8Ad38NA7UTjRe_PM6EeqZxj0FBTv9wXx1snw32mRqXJQJE4_tZv7Kxg_M";
+
 const isLocal = typeof location !== "undefined" && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
 export const CONFIG = {

@@ -60,10 +60,15 @@ infrastructure per platform and are delivered in a later release.
 
 ## Implementation status
 
-- ✅ **Phase 1 (this build):** notification protocol (sender broadcasts to all paired
-  devices, filename surfaced, click focuses the app), update detection + Updates panel +
-  rollback bookkeeping — all at the cross-platform web layer.
-- ⏳ **Phase 2:** native desktop tray + minimal background WebSocket helper + Tauri
-  in-place updater and rollback.
-- ⏳ **Phase 3:** Android local notifications + foreground/update handling.
-- ⏳ **Phase 4:** closed-app push (FCM / web-push+VAPID / APNs) via the signaling Worker.
+- ✅ **Phase 1:** notification protocol (sender broadcasts to all paired devices, filename
+  surfaced, click focuses the app), update detection + Updates panel + rollback bookkeeping.
+- ✅ **Phase 2:** desktop tray + minimal background WebSocket helper (webview destroyed in
+  tray) + Tauri in-place updater + rollback + Worker `notify` relay.
+- ✅ **Phase 3:** Android local notifications via the Capacitor plugin (while the app runs).
+- ✅ **Phase 4 (web-push):** closed-app Web Push for PWA installs — desktop browsers,
+  Android-browser, and **iOS 16.4+ home-screen PWAs**. The Worker stores push subscriptions
+  per room (Durable Object + SQLite) and sends a payloadless VAPID push when a file arrives;
+  the service worker fetches the filename from `/last-notify` and shows the notification.
+- ⏳ **Closed-app push for the *native* Android APK** needs Firebase Cloud Messaging (a
+  Firebase project + `google-services.json`). Native iOS isn't shipped (iOS uses the PWA,
+  already covered by Web Push above).

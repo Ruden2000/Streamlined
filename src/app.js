@@ -12,7 +12,7 @@ import { QR } from "./qr.js";
 import { Crypto } from "./crypto.js";
 import { Scanner } from "./scanner.js";
 import { createTransport } from "./transport.js";
-import { CONFIG, fetchIceServers, APP_VERSION, UPDATE_CONFIG } from "./config.js";
+import { CONFIG, fetchIceServers, APP_VERSION, UPDATE_CONFIG, VAPID_PUBLIC } from "./config.js";
 
 /* ---------- persistence (device identity + settings are unencrypted;
               history is encrypted with the network key) ---------- */
@@ -118,6 +118,8 @@ async function startNetwork(code) {
   // after the window is closed to the tray and the webview is gone.
   if (detectShell() === "tauri") {
     tauriInvoke("set_active_room", { info: { signalingUrl: CONFIG.signalingUrl, room: id, code, selfId: state.device.id } });
+  } else if (detectShell() === "web") {
+    subscribePush();   // register this room for closed-app web-push (if already permitted)
   }
   renderAll();
   return true;
@@ -556,27 +558,86 @@ function onNotify(msg) {
   toast("info", "Incoming file", '"' + msg.name + '" from ' + (msg.fromName || "a linked device"));
   showOsNotification(msg.name, msg.fromName);
 }
-function canNotify() {
-  return state.settings.notifications && typeof Notification !== "undefined" && Notification.permission === "granted";
-}
 function showOsNotification(name, fromName) {
-  if (!canNotify()) return;
+  if (!state.settings.notifications) return;
   if (document.visibilityState === "visible" && document.hasFocus()) return; // don't double-notify a focused app
+  const body = '"' + name + '" from ' + (fromName || "a linked device");
+
+  // Android (Capacitor): the WebView has no Notification API — use the native
+  // Local Notifications plugin (exposed on the global Capacitor bridge).
+  if (detectShell() === "capacitor") {
+    const LN = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications;
+    if (LN) LN.schedule({ notifications: [{ id: Date.now() % 2147483000, title: "Streamlined — incoming file", body }] }).catch(() => {});
+    return;
+  }
+
+  // Web / PWA: standard Notification API (works while a page/SW is alive).
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   try {
-    const n = new Notification("Streamlined — incoming file", {
-      body: '"' + name + '" from ' + (fromName || "a linked device"),
-      icon: "pwa-192.png",
-      tag: "sl-incoming"
-    });
+    const n = new Notification("Streamlined — incoming file", { body, icon: "pwa-192.png", tag: "sl-incoming" });
     n.onclick = () => { window.focus(); setActiveTab("history"); n.close(); };
   } catch (e) { console.warn("notification failed", e); }
+}
+
+// Ask for notification permission via the right mechanism for the shell.
+async function requestNotifyPermission() {
+  if (detectShell() === "capacitor") {
+    const LN = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.LocalNotifications;
+    if (!LN) return false;
+    try { const r = await LN.requestPermissions(); return r && r.display === "granted"; } catch { return false; }
+  }
+  if (typeof Notification === "undefined") return false;
+  if (Notification.permission === "granted") return true;
+  if (Notification.permission !== "default") return false;
+  try { return (await Notification.requestPermission()) === "granted"; } catch { return false; }
 }
 let _askedNotif = false;
 async function maybeRequestNotifyPermission() {
   if (_askedNotif || !state.settings.notifications) return;
-  if (typeof Notification === "undefined" || Notification.permission !== "default") return;
   _askedNotif = true;
-  try { await Notification.requestPermission(); } catch { /* user dismissed */ }
+  const granted = await requestNotifyPermission();
+  if (granted) subscribePush();   // Phase 4: register for closed-app web-push
+}
+
+/* ---- Web Push (PWA closed-app notifications) ----
+   Register a push subscription with the room's Durable Object. The Worker
+   wakes us with a payloadless push; the service worker fetches the filename.
+   Tauri uses its background helper instead; Android native uses FCM (later). */
+function urlB64ToUint8(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const base = (b64 + pad).replace(/-/g, "+").replace(/_/g, "/");
+  const raw = atob(base);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return out;
+}
+async function subscribePush() {
+  if (detectShell() !== "web") return;                       // PWA-only path
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+  if (!state.network) return;                                // need a room to key the subscription
+  if (typeof Notification !== "undefined" && Notification.permission !== "granted") return;
+  const httpBase = CONFIG.signalingUrl.replace(/^ws/, "http").replace(/\/+$/, "");
+  if (!httpBase) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlB64ToUint8(VAPID_PUBLIC) });
+    await fetch(httpBase + "/subscribe?room=" + encodeURIComponent(state.network.id), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ deviceId: state.device.id, subscription: sub })
+    });
+    // tell the SW its room + worker base so the push handler can fetch the filename
+    if (reg.active) reg.active.postMessage({ type: "sl-room", room: state.network.id, base: httpBase });
+  } catch (e) { console.warn("push subscribe failed", e); }
+}
+async function unsubscribePush() {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) await sub.unsubscribe();
+  } catch { /* ignore */ }
 }
 
 /* ====================================================================
@@ -862,11 +923,12 @@ function init() {
   $("#soundToggle").addEventListener("change", (e) => { state.settings.sound = e.target.checked; saveSettings(); });
   $("#notifToggle").addEventListener("change", async (e) => {
     state.settings.notifications = e.target.checked; saveSettings();
-    if (e.target.checked && typeof Notification !== "undefined" && Notification.permission === "default") {
-      try {
-        const p = await Notification.requestPermission();
-        if (p !== "granted") toast("warn", "Notifications blocked", "Allow notifications in your browser or OS settings to receive file alerts.");
-      } catch { /* dismissed */ }
+    if (e.target.checked) {
+      const granted = await requestNotifyPermission();
+      if (granted) subscribePush();
+      else toast("warn", "Notifications blocked", "Allow notifications in your browser or OS settings to receive file alerts.");
+    } else {
+      unsubscribePush();
     }
   });
   $("#clearHistBtn").addEventListener("click", () => { state.history = []; saveHistory(); renderHistory(); toast("good", "History cleared", "Local transfer history removed."); });

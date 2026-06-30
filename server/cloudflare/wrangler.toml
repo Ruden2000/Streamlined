@@ -2,6 +2,11 @@ name = "streamlined-signaling"
 main = "worker.js"
 compatibility_date = "2024-09-23"
 
+# Public Web Push identity (the private half is a secret: VAPID_PRIVATE).
+[vars]
+VAPID_PUBLIC = "BCvoofClfzLCLp9Nezbfo3vyPnm8Bv8Ad38NA7UTjRe_PM6EeqZxj0FBTv9wXx1snw32mRqXJQJE4_tZv7Kxg_M"
+VAPID_SUBJECT = "mailto:ray.yabardental@gmail.com"
+
 # Each pairing room is one Durable Object instance.
 [[durable_objects.bindings]]
 name = "SIGNALING_ROOM"
