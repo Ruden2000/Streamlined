@@ -19,5 +19,6 @@ export const state = {
   pendingOffers: new Map(),     // id -> offer (awaiting accept)
   history: [],                  // [{ id, name, size, type, dir, peer, ts, status, scan, blobB64? }]
   incidents: [],                // [{ id, name, ts, reasons, peer, deviceId }]
-  settings: { recentInMemory: 10, downloadableCopies: 3, scanning: true, autoAccept: false, sound: true, theme: "light" }
+  // theme: null until the user picks one, so first load can follow the OS preference
+  settings: { recentInMemory: 10, downloadableCopies: 3, scanning: true, autoAccept: false, sound: true, theme: null }
 };

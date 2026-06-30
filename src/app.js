@@ -252,7 +252,7 @@ async function streamFile(rec) {
       Transport.send({ type: "chunk", _to: rec.to, tid: rec.id, iv, ct, off: offset, total });
       offset += buf.length;
       rec.sent = offset; rec.progress = Math.round((offset / total) * 100);
-      renderTransfers();
+      queueProgress(rec.id);
       await new Promise((r) => setTimeout(r, 0)); // yield to UI
     }
     Transport.send({ type: "complete", _to: rec.to, tid: rec.id, name: rec.name, size: rec.size, mime: rec.type });
@@ -292,7 +292,7 @@ async function onChunk(msg) {
     inc.chunks.push({ off: msg.off, bytes });
     inc.received += bytes.length;
     const rec = state.transfers.get(msg.tid);
-    if (rec) { rec.progress = Math.round((inc.received / msg.total) * 100); renderTransfers(); }
+    if (rec) { rec.progress = Math.round((inc.received / msg.total) * 100); queueProgress(msg.tid); }
   } catch (e) { console.error("decrypt failed", e); }
 }
 
@@ -433,12 +433,42 @@ function renderTransfers() {
     const dirBadge = t.dir === "sent" ? '<span class="badge dir-sent">↑ Sending</span>' : '<span class="badge dir-recv">↓ Receiving</span>';
     const statusTxt = t.status === "done" ? "Complete" : t.status === "blocked" ? "Blocked" : t.status === "declined" ? "Declined" : t.status === "error" ? "Failed" : (t.dir === "sent" ? "to " : "from ") + escapeHtml(t.peer);
     const node = el("div", "transfer");
+    node.dataset.tid = t.id;
     node.innerHTML =
       '<div class="t-head">' + dirBadge + '<span class="t-name">' + escapeHtml(t.name) + '</span><span class="t-pct">' + (t.status === "blocked" ? "⛔" : t.progress + "%") + '</span></div>' +
       '<div class="bar"><i style="width:' + (t.status === "blocked" ? 100 : t.progress) + '%;' + (t.status === "blocked" ? "background:var(--danger)" : "") + '"></i></div>' +
       '<div class="t-sub"><span>' + statusTxt + '</span><span>' + fmtBytes(t.size) + '</span></div>';
     list.appendChild(node);
   }
+}
+
+/* In-flight progress updates fire once per 16 KB chunk. Rebuilding the whole
+   list each time is thousands of DOM rebuilds for a large file, so coalesce
+   per-frame and patch only the affected row's bar + percentage in place.
+   Structural changes (add/remove/status) still call renderTransfers(). */
+let _progressRaf = 0;
+const _dirtyTransfers = new Set();
+function queueProgress(tid) {
+  _dirtyTransfers.add(tid);
+  if (_progressRaf) return;
+  _progressRaf = requestAnimationFrame(flushProgress);
+}
+function flushProgress() {
+  _progressRaf = 0;
+  const list = $("#transfersList");
+  let needFull = false;
+  for (const tid of _dirtyTransfers) {
+    const t = state.transfers.get(tid);
+    if (!t) continue;
+    const row = list.querySelector('.transfer[data-tid="' + CSS.escape(tid) + '"]');
+    if (!row) { needFull = true; continue; }   // row not built yet — fall back to a full render once
+    const bar = row.querySelector(".bar > i");
+    if (bar) bar.style.width = (t.status === "blocked" ? 100 : t.progress) + "%";
+    const pctEl = row.querySelector(".t-pct");
+    if (pctEl) pctEl.textContent = t.status === "blocked" ? "⛔" : t.progress + "%";
+  }
+  _dirtyTransfers.clear();
+  if (needFull) renderTransfers();
 }
 
 function renderHistory() {
@@ -498,8 +528,48 @@ function emptyState(icon, title, sub) {
 /* ====================================================================
    UI WIRING
    ==================================================================== */
-function setActiveTab(name) {
-  $$(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === name));
+/* ---- accessible modals: move focus in on open, restore on close,
+        Escape to dismiss, and trap Tab within the dialog ---- */
+const FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+let lastFocused = null;
+function modalFocusables(scrim) { return $$(FOCUSABLE, scrim).filter((n) => n.offsetParent !== null); }
+function openModal(scrim) {
+  lastFocused = document.activeElement;
+  scrim.classList.add("open");
+  const f = modalFocusables(scrim);
+  (f[0] || scrim).focus();
+}
+function closeModal(scrim) {
+  scrim.classList.remove("open");
+  if (lastFocused && typeof lastFocused.focus === "function") lastFocused.focus();
+  lastFocused = null;
+}
+function handleModalKeydown(e) {
+  const scrim = $(".scrim.open");
+  if (!scrim) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    if (scrim.id === "incomingScrim") { if (currentOffer) { declineOffer(currentOffer); state.pendingOffers.delete(currentOffer.tid); } closeIncoming(); }
+    else closeModal(scrim);
+    return;
+  }
+  if (e.key === "Tab") {
+    const f = modalFocusables(scrim);
+    if (!f.length) return;
+    const first = f[0], last = f[f.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  }
+}
+
+function setActiveTab(name, focusTab = false) {
+  $$(".tab").forEach((t) => {
+    const on = t.dataset.tab === name;
+    t.classList.toggle("active", on);
+    t.setAttribute("aria-selected", on ? "true" : "false");
+    t.tabIndex = on ? 0 : -1;                 // roving tabindex: only the active tab is tab-reachable
+    if (on && focusTab) t.focus();
+  });
   $$(".tabpane").forEach((p) => p.classList.toggle("hide", p.dataset.pane !== name));
 }
 
@@ -532,9 +602,9 @@ function showIncomingPrompt(meta) {
   currentOffer = meta;
   $("#incTitle").textContent = "Incoming file";
   $("#incSub").textContent = '"' + meta.name + '" (' + fmtBytes(meta.size) + ") from " + deviceName(meta.from);
-  $("#incomingScrim").classList.add("open");
+  openModal($("#incomingScrim"));
 }
-function closeIncoming() { $("#incomingScrim").classList.remove("open"); currentOffer = null; }
+function closeIncoming() { closeModal($("#incomingScrim")); currentOffer = null; }
 
 /* ---- theme ---- */
 function applyTheme(theme) {
@@ -557,7 +627,9 @@ function addFiles(fileList) {
    ==================================================================== */
 function init() {
   loadLocal();
-  applyTheme(state.settings.theme);
+  // first visit (theme === null) follows the OS preference; once toggled it sticks
+  const sysDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  applyTheme(state.settings.theme || (sysDark ? "dark" : "light"));
   if (!Crypto.ok) $("#cryptoWarn").classList.add("show");
 
   // logo: use logo.png if it loads, else keep the SVG mark
@@ -573,10 +645,29 @@ function init() {
   const touchIcon = document.createElement("link"); touchIcon.rel = "apple-touch-icon"; touchIcon.href = "pwa-192.png"; document.head.appendChild(touchIcon);
   const iosCapable = document.createElement("meta"); iosCapable.name = "apple-mobile-web-app-capable"; iosCapable.content = "yes"; document.head.appendChild(iosCapable);
   const iosTitle = document.createElement("meta"); iosTitle.name = "apple-mobile-web-app-title"; iosTitle.content = "Streamlined"; document.head.appendChild(iosTitle);
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch((e) => console.warn("SW register failed", e));
+  // Register the SW only in production builds. In dev a network-first SW just
+  // causes stale-cache surprises, and sw.js isn't served from the source tree.
+  const isProd = typeof import.meta !== "undefined" && import.meta.env && import.meta.env.PROD;
+  if (isProd && "serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch((e) => console.warn("SW register failed", e));
 
-  // tabs
-  $$(".tab").forEach((t) => t.addEventListener("click", () => setActiveTab(t.dataset.tab)));
+  // tabs — click to select, arrow/Home/End for roving keyboard nav (ARIA tablist pattern)
+  const tabEls = $$(".tab");
+  tabEls.forEach((t) => t.addEventListener("click", () => setActiveTab(t.dataset.tab)));
+  $(".tabs").addEventListener("keydown", (e) => {
+    const i = tabEls.indexOf(document.activeElement);
+    if (i < 0) return;
+    let j = i;
+    if (e.key === "ArrowRight" || e.key === "ArrowDown") j = (i + 1) % tabEls.length;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowUp") j = (i - 1 + tabEls.length) % tabEls.length;
+    else if (e.key === "Home") j = 0;
+    else if (e.key === "End") j = tabEls.length - 1;
+    else return;
+    e.preventDefault();
+    setActiveTab(tabEls[j].dataset.tab, true);
+  });
+
+  // dialog keyboard handling (Escape + focus trap) for any open modal
+  document.addEventListener("keydown", handleModalKeydown);
 
   // theme
   $("#themeBtn").addEventListener("click", () => applyTheme(state.settings.theme === "dark" ? "light" : "dark"));
@@ -597,8 +688,8 @@ function init() {
   // link modal
   const scrim = $("#linkScrim");
   $("#linkBtn").addEventListener("click", openLinkModal);
-  $("#modalClose").addEventListener("click", () => scrim.classList.remove("open"));
-  scrim.addEventListener("click", (e) => { if (e.target === scrim) scrim.classList.remove("open"); });
+  $("#modalClose").addEventListener("click", () => closeModal(scrim));
+  scrim.addEventListener("click", (e) => { if (e.target === scrim) closeModal(scrim); });
   $("#segCreate").addEventListener("click", () => { setSeg("create"); createFreshCode(); });
   $("#segJoin").addEventListener("click", () => setSeg("join"));
   $("#copyCodeBtn").addEventListener("click", () => { if (state.network) { navigator.clipboard?.writeText(state.network.code); toast("good", "Copied", "Pairing code copied to clipboard."); } });
@@ -623,10 +714,11 @@ function init() {
 }
 
 function openLinkModal() {
-  $("#linkScrim").classList.add("open");
+  // set the pane BEFORE opening so focus lands on a visible control
   setSeg("create");
   if (state.network) showCode(state.network.code);
   else createFreshCode();
+  openModal($("#linkScrim"));
 }
 function setSeg(which) {
   $("#segCreate").classList.toggle("active", which === "create");
@@ -654,10 +746,10 @@ function showCode(code) {
 async function doJoin() {
   const code = $("#joinCode").value.trim().toUpperCase();
   if (code.length !== 6) { toast("warn", "Invalid code", "Pairing codes are 6 characters."); return; }
-  if (state.network && state.network.code === code) { toast("info", "Already linked", "This device is already on that network."); $("#linkScrim").classList.remove("open"); return; }
+  if (state.network && state.network.code === code) { toast("info", "Already linked", "This device is already on that network."); closeModal($("#linkScrim")); return; }
   const ok = await startNetwork(code);
   if (ok) {
-    $("#linkScrim").classList.remove("open");
+    closeModal($("#linkScrim"));
     toast("good", "Linked", "Joined network " + code + ".");
     setTimeout(() => { if (countActive() > MAX_DEVICES) toast("warn", "Network full", "This network already has 6 devices."); }, 600);
   }
