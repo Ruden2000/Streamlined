@@ -36,18 +36,20 @@ jobs:
           body: |
             ## Streamlined ${{ github.ref_name }}
 
-            ### Android
-            1. Download **Streamlined.apk**
-            2. On your phone → **Settings → Security → Install unknown apps** → allow your browser or Files app
-            3. Open the downloaded APK and tap **Install**
+            ### New in this release
+            - **Cross-device notifications** — when a linked device sends a file, your other paired devices are alerted with the filename; tap to open the app to it.
+            - **In-app updates + rollback** — check, update, or roll back from **Settings → Updates**; no manual redownload.
+            - **Runs light in the background (desktop)** — see below.
 
-            ### Windows
-            1. Download **Streamlined_x64-setup.exe**
-            2. Windows may show a SmartScreen warning — click **More info → Run anyway**
-            3. Streamlined will install and open automatically
+            ### About background running (Windows)
+            Closing Streamlined to the system tray **shuts down the main window to free its memory**. A tiny background helper keeps a single connection open purely so it can show you a **native notification with the filename** when a paired device sends a file — it never sees file contents (transfers stay peer-to-peer and encrypted). Click the notification (or the tray icon) to reopen the app. To stop it entirely, right-click the tray icon → **Quit**.
 
-            ### iPhone / iPad / Mac
-            Visit **https://streamlined-3bu.pages.dev** in Safari and tap **Share → Add to Home Screen**
+            Phones/PWA receive notifications via the OS even when the app is closed (Web Push on installed iOS 16.4+ / desktop browsers; local notifications on Android).
+
+            ### Install
+            **Android** — download **Streamlined.apk** → Settings → allow install from your browser → open the APK → Install.
+            **Windows** — download **Streamlined_x64-setup.exe** → if SmartScreen warns, **More info → Run anyway**.
+            **iPhone / iPad / Mac** — open **https://streamlined-3bu.pages.dev** in Safari → **Share → Add to Home Screen**.
 
             ---
             🔒 Files are transferred peer-to-peer with AES-256-GCM encryption. Nothing touches our servers. No account needed.
