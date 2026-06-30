@@ -113,6 +113,12 @@ async function startNetwork(code) {
   await loadHistory();
   state.devices.set(state.device.id, { ...state.device, lastSeen: Date.now(), banned: false, me: true });
   presenceTimer = setInterval(heartbeat, 4000);
+  // Hand the active room to the desktop background helper so it can keep
+  // receiving "incoming file" notices (and show native notifications) even
+  // after the window is closed to the tray and the webview is gone.
+  if (detectShell() === "tauri") {
+    tauriInvoke("set_active_room", { info: { signalingUrl: CONFIG.signalingUrl, room: id, code, selfId: state.device.id } });
+  }
   renderAll();
   return true;
 }
@@ -129,6 +135,7 @@ let presenceTimer = null;
 function leaveNetwork() {
   if (presenceTimer) clearInterval(presenceTimer);
   Transport.send({ type: "bye", device: { id: state.device.id } });
+  if (detectShell() === "tauri") tauriInvoke("clear_active_room");
   Transport.stop();
   state.network = null; state.devices.clear(); state.transfers.clear(); state.incoming.clear();
   state.history = []; state.incidents = [];
@@ -586,6 +593,13 @@ function detectShell() {
   if (window.Capacitor) return "capacitor";
   return "web";
 }
+// Call a Rust command (no-op outside the Tauri shell). withGlobalTauri exposes invoke here.
+function tauriInvoke(cmd, args) {
+  try {
+    const inv = window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke;
+    return inv ? inv(cmd, args) : Promise.resolve(undefined);
+  } catch { return Promise.resolve(undefined); }
+}
 function semverGt(a, b) {
   const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
   const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
@@ -628,8 +642,12 @@ function applyUpdate() {
     setTimeout(() => location.reload(), 600);    // SW (prod) fetches fresh assets
     return;
   }
-  // Native shells: open the signed installer for the new release. Silent in-place
-  // install via the Tauri updater / Android package installer lands in a later phase.
+  if (shell === "tauri") {
+    toast("info", "Updating", "Downloading and installing the latest version… the app will relaunch.");
+    tauriInvoke("run_update").catch((e) => toast("danger", "Update failed", String(e)));
+    return;
+  }
+  // Other native shells (Android): open the signed installer for the new release.
   window.open(state.update.url || ("https://github.com/" + UPDATE_CONFIG.repo + "/releases/latest"), "_blank");
 }
 function rememberPriorVersion(v) { try { localStorage.setItem("sl:prevVersion", v); } catch {} }
@@ -649,13 +667,14 @@ function updateRollbackUI() {
 function rollback() {
   const prev = getPriorVersion();
   if (!prev) return;
-  const shell = detectShell();
-  if (shell === "web") {
-    toast("info", "Rolling back", "Opening the previous version…");
+  const url = "https://github.com/" + UPDATE_CONFIG.repo + "/releases/tag/v" + prev;
+  if (detectShell() === "tauri") {
+    toast("info", "Rolling back", "Opening the previous version's installer…");
+    tauriInvoke("open_external", { url });
+    return;
   }
-  // The prior release page carries its signed installer; native shells will run
-  // it directly in a later phase. Web users reinstall the PWA from that build.
-  window.open("https://github.com/" + UPDATE_CONFIG.repo + "/releases/tag/v" + prev, "_blank");
+  toast("info", "Rolling back", "Opening the previous version…");
+  window.open(url, "_blank");
 }
 
 /* ====================================================================
@@ -859,6 +878,12 @@ function init() {
 
   renderAll();
   checkForUpdates(false);   // silent check on launch
+
+  // Desktop: after the window is recreated from the tray, the webview reloads
+  // fresh — rejoin the network the background helper is still holding.
+  if (detectShell() === "tauri") {
+    tauriInvoke("get_active_room").then((r) => { if (r && r.code && !state.network) startNetwork(r.code); }).catch(() => {});
+  }
 }
 
 function openLinkModal() {
