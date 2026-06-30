@@ -8,8 +8,25 @@ permissions:
   contents: write
 
 jobs:
-  # ── Create the GitHub Release first ─────────────────────────────────────────
+  # ── Tests gate the whole release ────────────────────────────────────────────
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+      - name: Install dependencies
+        run: npm ci
+      - name: Run tests
+        run: npm test
+      - name: Verify production build
+        run: npm run build
+
+  # ── Create the GitHub Release (only if tests pass) ──────────────────────────
   create-release:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
