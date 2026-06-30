@@ -68,7 +68,7 @@ jobs:
 
       - name: Decode signing keystore
         run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > android/streamlined.keystore
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > "$GITHUB_WORKSPACE/android/app/streamlined.keystore"
 
       - name: Make gradlew executable
         run: chmod +x android/gradlew
@@ -77,7 +77,7 @@ jobs:
         working-directory: android
         run: ./gradlew assembleRelease
         env:
-          STORE_FILE: streamlined.keystore
+          STORE_FILE: ${{ github.workspace }}/android/app/streamlined.keystore
           STORE_PASSWORD: ${{ secrets.KEYSTORE_PASS }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASS }}
