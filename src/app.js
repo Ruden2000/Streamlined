@@ -12,7 +12,7 @@ import { QR } from "./qr.js";
 import { Crypto } from "./crypto.js";
 import { Scanner } from "./scanner.js";
 import { createTransport } from "./transport.js";
-import { CONFIG, fetchIceServers } from "./config.js";
+import { CONFIG, fetchIceServers, APP_VERSION, UPDATE_CONFIG } from "./config.js";
 
 /* ---------- persistence (device identity + settings are unencrypted;
               history is encrypted with the network key) ---------- */
@@ -167,6 +167,7 @@ async function handleMessage(msg) {
     case "ban":
       markBanned(msg.deviceId);
       break;
+    case "notify":      onNotify(msg); break;
     case "offer":       await onOffer(msg); break;
     case "accept":      onAccept(msg); break;
     case "decline":     onDecline(msg); break;
@@ -212,6 +213,11 @@ async function sendOneFile(file, targetId) {
     ? [...state.devices.values()].filter((d) => !d.me && !d.banned).map((d) => d.id)
     : [targetId];
   if (!targets.length) { toast("warn", "No recipients", "No available devices to receive."); return; }
+
+  // Tell every paired device a file is entering the network so they can surface
+  // a notification. Broadcast (no _to); the transport drops our own echo, so the
+  // sender is never notified. Recipients still get the targeted "offer" below.
+  Transport.send({ type: "notify", name: file.name, size: file.size, mime: file.type || "application/octet-stream", fromName: state.device.name });
 
   for (const to of targets) {
     const tid = uid();
@@ -512,6 +518,8 @@ function renderSettings() {
   $("#scanToggle").checked = state.settings.scanning;
   $("#autoToggle").checked = state.settings.autoAccept;
   $("#soundToggle").checked = state.settings.sound;
+  $("#notifToggle").checked = state.settings.notifications;
+  $("#curVersion").textContent = "v" + APP_VERSION;
 }
 
 function emptyState(icon, title, sub) {
@@ -523,6 +531,129 @@ function emptyState(icon, title, sub) {
   };
   const e = el("div", "empty", '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' + (icons[icon] || "") + '</svg><div style="font-weight:600;color:var(--text)">' + title + '</div><div style="font-size:13px;margin-top:2px">' + sub + '</div>');
   return e;
+}
+
+/* ====================================================================
+   CROSS-DEVICE NOTIFICATIONS
+   --------------------------------------------------------------------
+   A "notify" broadcast arrives on every paired device except the sender.
+   We always surface an in-app toast; if the user enabled notifications,
+   permission is granted, and the app isn't already in the foreground, we
+   also raise an OS/web notification whose click focuses the app on the file.
+   (Delivery to fully-closed devices via FCM/web-push/APNs is a later phase;
+   this path covers devices currently running or in the tray helper.)
+   ==================================================================== */
+function onNotify(msg) {
+  toast("info", "Incoming file", '"' + msg.name + '" from ' + (msg.fromName || "a linked device"));
+  showOsNotification(msg.name, msg.fromName);
+}
+function canNotify() {
+  return state.settings.notifications && typeof Notification !== "undefined" && Notification.permission === "granted";
+}
+function showOsNotification(name, fromName) {
+  if (!canNotify()) return;
+  if (document.visibilityState === "visible" && document.hasFocus()) return; // don't double-notify a focused app
+  try {
+    const n = new Notification("Streamlined — incoming file", {
+      body: '"' + name + '" from ' + (fromName || "a linked device"),
+      icon: "pwa-192.png",
+      tag: "sl-incoming"
+    });
+    n.onclick = () => { window.focus(); setActiveTab("history"); n.close(); };
+  } catch (e) { console.warn("notification failed", e); }
+}
+let _askedNotif = false;
+async function maybeRequestNotifyPermission() {
+  if (_askedNotif || !state.settings.notifications) return;
+  if (typeof Notification === "undefined" || Notification.permission !== "default") return;
+  _askedNotif = true;
+  try { await Notification.requestPermission(); } catch { /* user dismissed */ }
+}
+
+/* ====================================================================
+   IN-APP UPDATES + ROLLBACK
+   --------------------------------------------------------------------
+   Detection + UI are platform-agnostic (compare APP_VERSION to the latest
+   GitHub tag). Applying the update is shell-specific: the web/PWA reloads to
+   pull fresh assets; native shells (Tauri/Capacitor) get silent in-place
+   install + true rollback in later phases — here they open the signed asset.
+   ==================================================================== */
+function detectShell() {
+  if (typeof window === "undefined") return "web";
+  if (window.__TAURI__ || window.__TAURI_INTERNALS__) return "tauri";
+  if (window.Capacitor) return "capacitor";
+  return "web";
+}
+function semverGt(a, b) {
+  const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < 3; i++) { if (pa[i] > pb[i]) return true; if (pa[i] < pb[i]) return false; }
+  return false;
+}
+async function checkForUpdates(manual) {
+  const statusEl = $("#updateStatus"), actions = $("#updateActions"), applyBtn = $("#applyUpdateBtn");
+  if (statusEl) statusEl.textContent = "Checking for updates…";
+  try {
+    const r = await fetch(UPDATE_CONFIG.releasesApi + "/latest", {
+      headers: { Accept: "application/vnd.github+json" },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const rel = await r.json();
+    const latest = String(rel.tag_name || "").replace(/^v/, "");
+    state.update = { latest, url: rel.html_url, notes: rel.body || "" };
+    if (latest && semverGt(latest, APP_VERSION)) {
+      if (statusEl) statusEl.innerHTML = "Version <strong>v" + escapeHtml(latest) + "</strong> is available (you have v" + escapeHtml(APP_VERSION) + ").";
+      if (actions) actions.style.display = "flex";
+      if (applyBtn) applyBtn.style.display = "inline-flex";
+      if (manual) toast("good", "Update available", "Version v" + latest + " is ready to install.");
+    } else {
+      if (statusEl) statusEl.textContent = "You're up to date (v" + APP_VERSION + ").";
+      if (applyBtn) applyBtn.style.display = "none";
+      if (manual) toast("good", "Up to date", "You're on the latest version.");
+    }
+  } catch (e) {
+    if (statusEl) statusEl.textContent = manual ? "Couldn't reach the update server — check your connection." : "Update check unavailable.";
+  }
+  updateRollbackUI();
+}
+function applyUpdate() {
+  if (!state.update || !state.update.latest) return;
+  rememberPriorVersion(APP_VERSION);             // so we can offer rollback afterwards
+  const shell = detectShell();
+  if (shell === "web") {
+    toast("info", "Updating", "Reloading to the latest version…");
+    setTimeout(() => location.reload(), 600);    // SW (prod) fetches fresh assets
+    return;
+  }
+  // Native shells: open the signed installer for the new release. Silent in-place
+  // install via the Tauri updater / Android package installer lands in a later phase.
+  window.open(state.update.url || ("https://github.com/" + UPDATE_CONFIG.repo + "/releases/latest"), "_blank");
+}
+function rememberPriorVersion(v) { try { localStorage.setItem("sl:prevVersion", v); } catch {} }
+function getPriorVersion() { try { return localStorage.getItem("sl:prevVersion"); } catch { return null; } }
+function updateRollbackUI() {
+  const btn = $("#rollbackBtn"), actions = $("#updateActions");
+  if (!btn) return;
+  const prev = getPriorVersion();
+  if (prev && prev !== APP_VERSION && semverGt(APP_VERSION, prev)) {
+    btn.style.display = "inline-flex";
+    btn.textContent = "Roll back to v" + prev;
+    if (actions) actions.style.display = "flex";
+  } else {
+    btn.style.display = "none";
+  }
+}
+function rollback() {
+  const prev = getPriorVersion();
+  if (!prev) return;
+  const shell = detectShell();
+  if (shell === "web") {
+    toast("info", "Rolling back", "Opening the previous version…");
+  }
+  // The prior release page carries its signed installer; native shells will run
+  // it directly in a later phase. Web users reinstall the PWA from that build.
+  window.open("https://github.com/" + UPDATE_CONFIG.repo + "/releases/tag/v" + prev, "_blank");
 }
 
 /* ====================================================================
@@ -708,9 +839,24 @@ function init() {
   $("#scanToggle").addEventListener("change", (e) => { state.settings.scanning = e.target.checked; saveSettings(); if (!e.target.checked) toast("warn", "Scanning disabled", "Outgoing files will not be checked. Not recommended."); });
   $("#autoToggle").addEventListener("change", (e) => { state.settings.autoAccept = e.target.checked; saveSettings(); });
   $("#soundToggle").addEventListener("change", (e) => { state.settings.sound = e.target.checked; saveSettings(); });
+  $("#notifToggle").addEventListener("change", async (e) => {
+    state.settings.notifications = e.target.checked; saveSettings();
+    if (e.target.checked && typeof Notification !== "undefined" && Notification.permission === "default") {
+      try {
+        const p = await Notification.requestPermission();
+        if (p !== "granted") toast("warn", "Notifications blocked", "Allow notifications in your browser or OS settings to receive file alerts.");
+      } catch { /* dismissed */ }
+    }
+  });
   $("#clearHistBtn").addEventListener("click", () => { state.history = []; saveHistory(); renderHistory(); toast("good", "History cleared", "Local transfer history removed."); });
 
+  // updates panel
+  $("#checkUpdateBtn").addEventListener("click", () => checkForUpdates(true));
+  $("#applyUpdateBtn").addEventListener("click", applyUpdate);
+  $("#rollbackBtn").addEventListener("click", rollback);
+
   renderAll();
+  checkForUpdates(false);   // silent check on launch
 }
 
 function openLinkModal() {
@@ -735,7 +881,7 @@ async function createFreshCode() {
   showCode(code);
   const ok = await startNetwork(code);
   creatingNetwork = false;
-  if (ok) toast("good", "Network created", "Share the code or QR with up to 5 more devices.");
+  if (ok) { toast("good", "Network created", "Share the code or QR with up to 5 more devices."); maybeRequestNotifyPermission(); }
 }
 function showCode(code) {
   $("#codeDisplay").textContent = code;
@@ -750,6 +896,7 @@ async function doJoin() {
   const ok = await startNetwork(code);
   if (ok) {
     closeModal($("#linkScrim"));
+    maybeRequestNotifyPermission();
     toast("good", "Linked", "Joined network " + code + ".");
     setTimeout(() => { if (countActive() > MAX_DEVICES) toast("warn", "Network full", "This network already has 6 devices."); }, 600);
   }

@@ -150,6 +150,30 @@
             </div>
             <label class="switch"><input type="checkbox" id="soundToggle" checked /><span class="slider"></span></label>
           </div>
+          <div class="setting">
+            <div class="s-meta">
+              <div class="s-label">Incoming-file notifications</div>
+              <div class="s-desc">Alert this device when any linked device sends a file into the network</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="notifToggle" checked /><span class="slider"></span></label>
+          </div>
+
+          <!-- UPDATES (in-app updater + rollback) -->
+          <div class="updates-block">
+            <h2>Updates</h2>
+            <div class="setting">
+              <div class="s-meta">
+                <div class="s-label">Current version</div>
+                <div class="s-desc">You're running <strong id="curVersion">…</strong></div>
+              </div>
+              <button class="btn ghost sm" id="checkUpdateBtn">Check now</button>
+            </div>
+            <p class="notice" id="updateStatus">Checking for updates…</p>
+            <div class="send-row" id="updateActions" style="display:none">
+              <button class="btn primary sm" id="applyUpdateBtn" style="display:none">Update now</button>
+              <button class="btn ghost sm" id="rollbackBtn" style="display:none">Roll back</button>
+            </div>
+          </div>
         </div>
 
         <!-- INCIDENTS -->

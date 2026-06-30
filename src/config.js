@@ -7,6 +7,16 @@
    ==================================================================== */
 const env = (typeof import.meta !== "undefined" && import.meta.env) ? import.meta.env : {};
 
+// Bump this in lockstep with package.json / tauri.conf.json / android versionName
+// on every release — the in-app updater compares it against the latest GitHub tag.
+export const APP_VERSION = "1.0.1";
+
+export const UPDATE_CONFIG = {
+  repo: "Ruden2000/Streamlined",
+  // Public, unauthenticated GitHub Releases API (60 req/hr/IP — ample for update checks).
+  releasesApi: "https://api.github.com/repos/Ruden2000/Streamlined/releases"
+};
+
 const isLocal = typeof location !== "undefined" && /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
 
 export const CONFIG = {
