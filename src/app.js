@@ -120,6 +120,8 @@ async function startNetwork(code) {
     tauriInvoke("set_active_room", { info: { signalingUrl: CONFIG.signalingUrl, room: id, code, selfId: state.device.id } });
   } else if (detectShell() === "web") {
     subscribePush();   // register this room for closed-app web-push (if already permitted)
+  } else if (detectShell() === "capacitor") {
+    registerFcm();     // register this room for native Android FCM (if permitted + configured)
   }
   renderAll();
   return true;
@@ -596,7 +598,7 @@ async function maybeRequestNotifyPermission() {
   if (_askedNotif || !state.settings.notifications) return;
   _askedNotif = true;
   const granted = await requestNotifyPermission();
-  if (granted) subscribePush();   // Phase 4: register for closed-app web-push
+  if (granted) { subscribePush(); registerFcm(); }   // web-push (PWA) / FCM (Android APK); each guards its own shell
 }
 
 /* ---- Web Push (PWA closed-app notifications) ----
@@ -638,6 +640,42 @@ async function unsubscribePush() {
     const sub = await reg.pushManager.getSubscription();
     if (sub) await sub.unsubscribe();
   } catch { /* ignore */ }
+}
+
+/* ---- FCM (native Android closed-app push) ----
+   Register for FCM, then hand the device token to the room's DO so the Worker
+   can wake a fully-killed APK. No-op until google-services.json is bundled and
+   the Worker has FCM_SERVICE_ACCOUNT set. Android PWA users use Web Push above. */
+async function registerFcm() {
+  if (detectShell() !== "capacitor") return;
+  if (!state.network) return;
+  const PN = window.Capacitor && window.Capacitor.Plugins && window.Capacitor.Plugins.PushNotifications;
+  if (!PN) return;
+  try {
+    const perm = await PN.requestPermissions();
+    if (perm && perm.receive !== "granted") return;
+    if (!window.__slFcmWired) {
+      window.__slFcmWired = true;
+      PN.addListener("registration", (t) => { window.__slFcmToken = t && t.value; sendFcmToken(); });
+      PN.addListener("pushNotificationReceived", (n) => {
+        const t = (n && (n.title || (n.notification && n.notification.title))) || "Incoming file";
+        const b = (n && (n.body || (n.notification && n.notification.body))) || "";
+        toast("info", t, b);   // foreground; FCM auto-shows when backgrounded/killed
+      });
+    }
+    if (window.__slFcmToken) sendFcmToken();   // re-register an existing token for this room
+    await PN.register();
+  } catch (e) { console.warn("fcm register failed", e); }
+}
+function sendFcmToken() {
+  if (!window.__slFcmToken || !state.network) return;
+  const httpBase = CONFIG.signalingUrl.replace(/^ws/, "http").replace(/\/+$/, "");
+  if (!httpBase) return;
+  fetch(httpBase + "/fcm-register?room=" + encodeURIComponent(state.network.id), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ deviceId: state.device.id, token: window.__slFcmToken })
+  }).catch(() => {});
 }
 
 /* ====================================================================
@@ -925,7 +963,7 @@ function init() {
     state.settings.notifications = e.target.checked; saveSettings();
     if (e.target.checked) {
       const granted = await requestNotifyPermission();
-      if (granted) subscribePush();
+      if (granted) { subscribePush(); registerFcm(); }
       else toast("warn", "Notifications blocked", "Allow notifications in your browser or OS settings to receive file alerts.");
     } else {
       unsubscribePush();

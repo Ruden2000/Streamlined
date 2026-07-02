@@ -11,6 +11,7 @@
    worker then calls /last-notify to show the filename.
    ==================================================================== */
 import { buildVapidJwt, vapidAuthHeader, audienceFor } from "./vapid.js";
+import { getFcmAccessToken, sendFcm } from "./fcm.js";
 
 const MAX_ROOM = 6;
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type" };
@@ -22,6 +23,9 @@ export class SignalingRoom {
     this.env = env;
     this.state.storage.sql.exec(
       "CREATE TABLE IF NOT EXISTS subs (endpoint TEXT PRIMARY KEY, device_id TEXT, sub TEXT)"
+    );
+    this.state.storage.sql.exec(
+      "CREATE TABLE IF NOT EXISTS fcm (token TEXT PRIMARY KEY, device_id TEXT)"
     );
   }
 
@@ -39,6 +43,18 @@ export class SignalingRoom {
         body.subscription.endpoint,
         String(body.deviceId || ""),
         JSON.stringify(body.subscription)
+      );
+      return json({ ok: true });
+    }
+
+    // Register / refresh a native-Android FCM token for this room.
+    if (url.pathname === "/fcm-register" && request.method === "POST") {
+      const body = await request.json().catch(() => null);
+      if (!body || !body.token) return json({ ok: false }, { status: 400 });
+      this.state.storage.sql.exec(
+        "INSERT OR REPLACE INTO fcm(token, device_id) VALUES (?,?)",
+        String(body.token),
+        String(body.deviceId || "")
       );
       return json({ ok: true });
     }
@@ -90,7 +106,9 @@ export class SignalingRoom {
       const att = ws.deserializeAttachment() || {};
       for (const pid of this._ids(att.id)) { const t = this._byId(pid); if (t) this._send(t, m); }
       await this.state.storage.put("lastNotify", { name: m.name, fromName: m.fromName, ts: Date.now() });
-      await this._pushToSubs(att.id, this._ids(att.id));
+      const live = this._ids(att.id);
+      await this._pushToSubs(att.id, live);
+      await this._pushToFcm(att.id, live, m);
     }
   }
 
@@ -116,6 +134,32 @@ export class SignalingRoom {
         }
       } catch { /* skip this endpoint */ }
     }
+  }
+
+  // Wake fully-closed native Android apps via FCM (HTTP v1). Access token is
+  // cached in memory for its lifetime to avoid re-minting on every notify.
+  async _pushToFcm(senderId, liveIds, m) {
+    if (!this.env.FCM_SERVICE_ACCOUNT) return;
+    let rows;
+    try { rows = this.state.storage.sql.exec("SELECT token, device_id FROM fcm").toArray(); } catch { return; }
+    if (!rows.length) return;
+    let sa;
+    try { sa = JSON.parse(this.env.FCM_SERVICE_ACCOUNT); } catch { return; }
+    const live = new Set([senderId, ...liveIds]);
+    try {
+      const now = Date.now();
+      if (!this._fcmToken || now >= this._fcmExp) {
+        this._fcmToken = await getFcmAccessToken(sa);
+        this._fcmExp = now + 3000 * 1000;   // ~50 min (token lasts 60)
+      }
+      const title = "Streamlined — incoming file";
+      const body = '"' + (m.name || "a file") + '" from ' + (m.fromName || "a linked device");
+      for (const row of rows) {
+        if (live.has(row.device_id)) continue;
+        const status = await sendFcm(this._fcmToken, sa.project_id, row.token, title, body);
+        if (status === 404) this.state.storage.sql.exec("DELETE FROM fcm WHERE token = ?", row.token);
+      }
+    } catch { /* token/network failure — skip this round */ }
   }
 
   async webSocketClose(ws) { this._announceLeave(ws); }
@@ -163,7 +207,7 @@ export default {
     if (url.pathname === "/turn") return handleTurn(env);
 
     // Push subscription endpoints are routed to the room's Durable Object.
-    if (url.pathname === "/subscribe" || url.pathname === "/last-notify") {
+    if (url.pathname === "/subscribe" || url.pathname === "/last-notify" || url.pathname === "/fcm-register") {
       const room = url.searchParams.get("room") || "default";
       const stub = env.SIGNALING_ROOM.get(env.SIGNALING_ROOM.idFromName(room));
       return stub.fetch(request);

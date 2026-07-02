@@ -55,6 +55,14 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npx cap sync android
+      - name: Write google-services.json (if configured)
+        run: |
+          if [ -n "${{ secrets.GOOGLE_SERVICES_JSON }}" ]; then
+            echo "${{ secrets.GOOGLE_SERVICES_JSON }}" | base64 --decode > android/app/google-services.json
+            echo "FCM enabled for this build"
+          else
+            echo "no GOOGLE_SERVICES_JSON secret — building without FCM"
+          fi
       - name: Assemble debug APK
         working-directory: android
         run: |
