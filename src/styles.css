@@ -215,6 +215,8 @@ select.target {
 .device .dv-name { font-weight: 600; font-size: 14px; }
 .device .dv-sub { font-size: 12px; color: var(--text-muted); }
 .device.banned { opacity: .7; border-color: color-mix(in srgb, var(--danger) 35%, var(--border)); background: var(--danger-soft); }
+.device.offline { opacity: .55; }
+.device.offline .dv-ic { background: var(--border); color: var(--text-muted); }
 .device.me .dv-name::after { content: "you"; font-size: 10px; font-weight: 700; margin-left: 8px; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); vertical-align: middle; }
 
 /* ---- history ---- */

@@ -91,8 +91,9 @@ function onPeerOpen(peerId) {
   else Transport.send({ type: "hello", device: dev });
 }
 function onPeerClose(peerId) {
+  // link dropped ≠ unlinked: keep the device in the roster, just mark Offline
   const d = state.devices.get(peerId);
-  if (d && !d.me) { state.devices.delete(peerId); renderDevices(); renderTargets(); }
+  if (d && !d.me) { d.online = false; renderDevices(); renderTargets(); }
 }
 
 /* ====================================================================
@@ -111,7 +112,9 @@ async function startNetwork(code) {
   state.network = { code, id, key };
   await Transport.start(id);        // fetches ICE servers, then connects; peers greeted on link open
   await loadHistory();
-  state.devices.set(state.device.id, { ...state.device, lastSeen: Date.now(), banned: false, me: true });
+  state.devices.clear();   // drop any previous network's roster from the UI
+  state.devices.set(state.device.id, { ...state.device, lastSeen: Date.now(), online: true, banned: false, me: true });
+  loadRoster();            // restore paired devices (shown Offline until they reappear)
   presenceTimer = setInterval(heartbeat, 4000);
   // Hand the active room to the desktop background helper so it can keep
   // receiving "incoming file" notices (and show native notifications) even
@@ -139,7 +142,9 @@ function heartbeat() {
   Transport.send({ type: "ping", device: { id: state.device.id, name: state.device.name, type: state.device.type } });
   const now = Date.now();
   let changed = false;
-  for (const [id, d] of state.devices) { if (!d.me && now - d.lastSeen > 12000) { state.devices.delete(id); changed = true; } }
+  // silent peers go Offline but STAY in the roster — pairing is permanent
+  // until the user leaves the network or removes the app.
+  for (const [, d] of state.devices) { if (!d.me && d.online && now - d.lastSeen > 12000) { d.online = false; changed = true; } }
   if (changed) { renderDevices(); renderTargets(); }
 }
 let presenceTimer = null;
@@ -148,7 +153,10 @@ function leaveNetwork() {
   if (presenceTimer) clearInterval(presenceTimer);
   Transport.send({ type: "bye", device: { id: state.device.id } });
   if (detectShell() === "tauri") tauriInvoke("clear_active_room");
-  try { localStorage.removeItem("sl:lastCode"); } catch { /* ignore */ }
+  try {
+    localStorage.removeItem("sl:lastCode");
+    if (state.network) localStorage.removeItem(rosterKey(state.network.id));   // manual unlink forgets the roster
+  } catch { /* ignore */ }
   state.clip = { text: "", ts: 0, fromName: "" };
   $("#clipInput").value = "";
   renderClipView(false);
@@ -164,10 +172,31 @@ function registerDevice(d) {
   const known = state.devices.has(d.id);
   if (!known && countActive() >= MAX_DEVICES) { return; } // network full — ignore
   const prev = state.devices.get(d.id) || {};
-  state.devices.set(d.id, { ...prev, ...d, lastSeen: Date.now(), banned: prev.banned || false });
-  if (!known) { renderDevices(); renderTargets(); }
+  const wasOnline = !!prev.online;
+  state.devices.set(d.id, { ...prev, ...d, lastSeen: Date.now(), online: true, banned: prev.banned || false });
+  if (!known || prev.name !== d.name || prev.type !== d.type) saveRoster();
+  if (!known || !wasOnline) { renderDevices(); renderTargets(); }
 }
 function countActive() { return state.devices.size; }
+
+/* ---- persistent roster: paired devices stay linked (listed) across
+        restarts and offline periods, until the user leaves the network ---- */
+function rosterKey(netId) { return "sl:roster:" + netId; }
+function saveRoster() {
+  if (!state.network) return;
+  const list = [...state.devices.values()].filter((d) => !d.me)
+    .map((d) => ({ id: d.id, name: d.name, type: d.type, banned: !!d.banned }));
+  try { localStorage.setItem(rosterKey(state.network.id), JSON.stringify(list)); } catch { /* ignore */ }
+}
+function loadRoster() {
+  if (!state.network) return;
+  try {
+    const list = JSON.parse(localStorage.getItem(rosterKey(state.network.id)) || "[]");
+    for (const d of list) {
+      if (d && d.id && !state.devices.has(d.id)) state.devices.set(d.id, { ...d, online: false, lastSeen: 0 });
+    }
+  } catch { /* ignore */ }
+}
 
 /* ====================================================================
    MESSAGE HANDLING
@@ -187,9 +216,12 @@ async function handleMessage(msg) {
     case "ping":
       registerDevice(msg.device);
       break;
-    case "bye":
-      if (msg.device && state.devices.has(msg.device.id) && !state.devices.get(msg.device.id).me) { state.devices.delete(msg.device.id); renderDevices(); renderTargets(); }
+    case "bye": {
+      // an explicit "bye" means the device chose to leave — unlink it fully
+      const dv = msg.device && state.devices.get(msg.device.id);
+      if (dv && !dv.me) { state.devices.delete(msg.device.id); saveRoster(); renderDevices(); renderTargets(); }
       break;
+    }
     case "ban":
       markBanned(msg.deviceId);
       break;
@@ -206,7 +238,7 @@ async function handleMessage(msg) {
 
 function markBanned(deviceId) {
   const d = state.devices.get(deviceId);
-  if (d) { d.banned = true; }
+  if (d) { d.banned = true; saveRoster(); }
   if (deviceId === state.device.id) {
     state.device.banned = true;
     toast("danger", "Device quarantined", "This device attempted to send blocked content and can no longer transfer on this network.");
@@ -424,12 +456,16 @@ function renderDevices() {
   const list = $("#devicesList"); list.innerHTML = "";
   $("#devCount").textContent = "(" + countActive() + "/" + MAX_DEVICES + ")";
   if (!state.network) { list.appendChild(emptyState("link", "Not linked yet", "Create or enter a pairing code to start a network.")); return; }
-  for (const d of state.devices.values()) {
-    const row = el("div", "device" + (d.me ? " me" : "") + (d.banned ? " banned" : ""));
+  const devs = [...state.devices.values()]
+    .sort((a, b) => (b.me ? 1 : 0) - (a.me ? 1 : 0) || (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name)));
+  for (const d of devs) {
+    const off = !d.me && !d.online;
+    const row = el("div", "device" + (d.me ? " me" : "") + (d.banned ? " banned" : "") + (off ? " offline" : ""));
+    const status = d.banned ? "⛔ Quarantined" : d.me ? "This device" : d.online ? "Online" : "Offline · still linked";
     row.innerHTML =
       '<div class="dv-ic">' + (DEVICE_ICONS[d.type] || DEVICE_ICONS.desktop) + '</div>' +
       '<div class="dv-meta"><div class="dv-name">' + escapeHtml(d.name) + '</div>' +
-      '<div class="dv-sub">' + (d.banned ? "⛔ Quarantined" : d.me ? "This device" : "Online") + " · " + d.type + '</div></div>';
+      '<div class="dv-sub">' + status + " · " + d.type + '</div></div>';
     list.appendChild(row);
   }
 }
@@ -437,10 +473,14 @@ function renderDevices() {
 function renderTargets() {
   const sel = $("#targetSelect"); const prev = sel.value;
   sel.innerHTML = "";
-  const others = [...state.devices.values()].filter((d) => !d.me && !d.banned);
+  const others = [...state.devices.values()].filter((d) => !d.me && !d.banned && d.online);
   if (others.length > 1) { const o = el("option"); o.value = "*"; o.textContent = "All devices (" + others.length + ")"; sel.appendChild(o); }
   for (const d of others) { const o = el("option"); o.value = d.id; o.textContent = d.name; sel.appendChild(o); }
-  if (!others.length) { const o = el("option"); o.value = ""; o.textContent = "No devices linked"; sel.appendChild(o); }
+  if (!others.length) {
+    const anyLinked = [...state.devices.values()].some((d) => !d.me);
+    const o = el("option"); o.value = ""; o.textContent = anyLinked ? "No devices online" : "No devices linked";
+    sel.appendChild(o);
+  }
   if (prev) sel.value = prev;
 }
 

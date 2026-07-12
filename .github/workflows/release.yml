@@ -37,6 +37,7 @@ jobs:
             ## Streamlined ${{ github.ref_name }}
 
             ### New in this release
+            - **Devices stay linked** — paired devices remain in your network permanently (shown as Offline when away) until you tap Leave network or remove the app. Reopening the app re-links automatically.
             - **Synced clipboard** — paste text on one device and it appears on every linked device instantly, over the direct encrypted peer connection (never a server). Pasted links become clickable everywhere.
             - **Launch at startup (desktop)** — optional; first launch asks once. Starts hidden in the tray using minimal memory and re-links your network automatically.
             - **Automatic re-linking** — reopening the app rejoins your last network on every platform; no need to re-enter the code.
