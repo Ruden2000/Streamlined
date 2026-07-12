@@ -6,7 +6,7 @@
    signaling transport; the message protocol (hello/offer/chunk/complete)
    is designed to stay the same so the rest of this file is unaffected.
    ==================================================================== */
-import { $, $$, el, fmtBytes, fmtTime, uid, escapeHtml, b64ToBytes, blobToB64 } from "./util.js";
+import { $, $$, el, fmtBytes, fmtTime, uid, escapeHtml, linkify, b64ToBytes, blobToB64 } from "./util.js";
 import { state, MAX_DEVICES, CHUNK } from "./state.js";
 import { QR } from "./qr.js";
 import { Crypto } from "./crypto.js";
@@ -116,8 +116,16 @@ async function startNetwork(code) {
   // Hand the active room to the desktop background helper so it can keep
   // receiving "incoming file" notices (and show native notifications) even
   // after the window is closed to the tray and the webview is gone.
+  // remember the network so this device re-links automatically on next launch
+  try { localStorage.setItem("sl:lastCode", code); } catch { /* private mode */ }
   if (detectShell() === "tauri") {
     tauriInvoke("set_active_room", { info: { signalingUrl: CONFIG.signalingUrl, room: id, code, selfId: state.device.id } });
+    // Autostart boot (--hidden): once the helper holds the room, close the
+    // window so only the minimal tray helper stays resident.
+    if (!window.__slRetired) {
+      window.__slRetired = true;
+      tauriInvoke("launch_hidden").then((h) => { if (h) tauriInvoke("retire_to_tray"); }).catch(() => {});
+    }
   } else if (detectShell() === "web") {
     subscribePush();   // register this room for closed-app web-push (if already permitted)
   } else if (detectShell() === "capacitor") {
@@ -140,6 +148,10 @@ function leaveNetwork() {
   if (presenceTimer) clearInterval(presenceTimer);
   Transport.send({ type: "bye", device: { id: state.device.id } });
   if (detectShell() === "tauri") tauriInvoke("clear_active_room");
+  try { localStorage.removeItem("sl:lastCode"); } catch { /* ignore */ }
+  state.clip = { text: "", ts: 0, fromName: "" };
+  $("#clipInput").value = "";
+  renderClipView(false);
   Transport.stop();
   state.network = null; state.devices.clear(); state.transfers.clear(); state.incoming.clear();
   state.history = []; state.incidents = [];
@@ -168,6 +180,8 @@ async function handleMessage(msg) {
       Transport.send({ type: "welcome", _to: msg.device.id, device: { id: state.device.id, name: state.device.name, type: state.device.type } });
       // share who we currently know is banned
       for (const [id, d] of state.devices) if (d.banned) Transport.send({ type: "ban", _to: msg.device.id, deviceId: id });
+      // bring the newcomer up to date on the synced clipboard
+      if (state.clip.text) Transport.send({ type: "clip", _to: msg.device.id, text: state.clip.text, ts: state.clip.ts, fromName: state.clip.fromName });
       break;
     case "welcome":
     case "ping":
@@ -180,6 +194,7 @@ async function handleMessage(msg) {
       markBanned(msg.deviceId);
       break;
     case "notify":      onNotify(msg); break;
+    case "clip":        onClip(msg); break;
     case "offer":       await onOffer(msg); break;
     case "accept":      onAccept(msg); break;
     case "decline":     onDecline(msg); break;
@@ -544,6 +559,45 @@ function emptyState(icon, title, sub) {
   };
   const e = el("div", "empty", '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">' + (icons[icon] || "") + '</svg><div style="font-weight:600;color:var(--text)">' + title + '</div><div style="font-size:13px;margin-top:2px">' + sub + '</div>');
   return e;
+}
+
+/* ====================================================================
+   SYNCED CLIPBOARD
+   --------------------------------------------------------------------
+   A "clip" broadcast carries the shared text to every linked device over
+   the direct peer connection (DataChannels are DTLS-encrypted; nothing
+   goes through the server). Last-writer-wins by timestamp; late joiners
+   receive the current clip in response to their "hello".
+   ==================================================================== */
+let _clipTimer = null;
+function setClipLocal(text) {
+  state.clip = { text, ts: Date.now(), fromName: state.device.name };
+  renderClipView(false);
+  clearTimeout(_clipTimer);
+  _clipTimer = setTimeout(() => {
+    if (state.network) Transport.send({ type: "clip", text: state.clip.text, ts: state.clip.ts, fromName: state.clip.fromName });
+  }, 350);  // debounce: one broadcast per pause in typing, not per keystroke
+}
+function onClip(msg) {
+  if (typeof msg.text !== "string") return;
+  if (msg.ts && state.clip.ts && msg.ts <= state.clip.ts) return;   // stale update
+  state.clip = { text: msg.text, ts: msg.ts || Date.now(), fromName: msg.fromName || "" };
+  const inp = $("#clipInput");
+  if (document.activeElement !== inp) inp.value = state.clip.text;  // don't fight active typing
+  renderClipView(true);
+}
+function renderClipView(remote) {
+  const view = $("#clipView");
+  if (!state.clip.text) { view.hidden = true; view.innerHTML = ""; return; }
+  const meta = remote && state.clip.fromName
+    ? '<span class="clip-meta">from ' + escapeHtml(state.clip.fromName) + " · " + fmtTime(state.clip.ts) + "</span>"
+    : "";
+  view.innerHTML = meta + linkify(state.clip.text);
+  view.hidden = false;
+}
+function openLink(url) {
+  if (detectShell() === "tauri") { tauriInvoke("open_external", { url }); return; }
+  window.open(url, "_blank", "noopener");
 }
 
 /* ====================================================================
@@ -976,13 +1030,58 @@ function init() {
   $("#applyUpdateBtn").addEventListener("click", applyUpdate);
   $("#rollbackBtn").addEventListener("click", rollback);
 
+  // synced clipboard
+  $("#clipInput").addEventListener("input", (e) => setClipLocal(e.target.value));
+  $("#clipClearBtn").addEventListener("click", () => { $("#clipInput").value = ""; setClipLocal(""); });
+  $("#clipView").addEventListener("click", (e) => {
+    const a = e.target.closest("a");
+    if (!a) return;
+    e.preventDefault();
+    openLink(a.href);   // shell-aware: system browser on desktop, new tab elsewhere
+  });
+
+  // desktop: startup-launch setting + one-time first-run prompt
+  if (detectShell() === "tauri") {
+    $("#startupSetting").style.display = "flex";
+    tauriInvoke("get_autostart").then((on) => { if (typeof on === "boolean") $("#startupToggle").checked = on; }).catch(() => {});
+    $("#startupToggle").addEventListener("change", async (e) => {
+      const on = e.target.checked;
+      try {
+        await tauriInvoke("set_autostart", { enable: on });
+        toast("good", on ? "Startup enabled" : "Startup disabled", on ? "Streamlined will open quietly in the tray when you sign in." : "Streamlined will no longer launch automatically.");
+      } catch (err) { e.target.checked = !on; toast("danger", "Couldn't update startup setting", String(err)); }
+    });
+    $("#startupYes").addEventListener("click", async () => {
+      try { await tauriInvoke("set_autostart", { enable: true }); $("#startupToggle").checked = true; toast("good", "Startup enabled", "Streamlined will open quietly in the tray when you sign in."); }
+      catch (err) { toast("danger", "Couldn't enable startup", String(err)); }
+      closeModal($("#startupScrim"));
+    });
+    $("#startupNo").addEventListener("click", () => closeModal($("#startupScrim")));
+    if (!localStorage.getItem("sl:askedAutostart")) {
+      localStorage.setItem("sl:askedAutostart", "1");
+      setTimeout(() => openModal($("#startupScrim")), 800);
+    }
+  }
+
   renderAll();
   checkForUpdates(false);   // silent check on launch
 
   // Desktop: after the window is recreated from the tray, the webview reloads
   // fresh — rejoin the network the background helper is still holding.
+  // Everywhere: fall back to the last-used pairing code so a relaunched app
+  // (including an autostart boot) re-links without user action.
+  const rejoinLast = () => {
+    if (state.network) return;
+    let last = null;
+    try { last = localStorage.getItem("sl:lastCode"); } catch { /* ignore */ }
+    if (last) startNetwork(last);
+  };
   if (detectShell() === "tauri") {
-    tauriInvoke("get_active_room").then((r) => { if (r && r.code && !state.network) startNetwork(r.code); }).catch(() => {});
+    tauriInvoke("get_active_room")
+      .then((r) => { if (r && r.code && !state.network) startNetwork(r.code); else rejoinLast(); })
+      .catch(rejoinLast);
+  } else {
+    rejoinLast();
   }
 }
 

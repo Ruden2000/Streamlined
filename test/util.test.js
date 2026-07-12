@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { bytesToB64, b64ToBytes, fmtBytes, escapeHtml, uid } from "../src/util.js";
+import { bytesToB64, b64ToBytes, fmtBytes, escapeHtml, linkify, uid } from "../src/util.js";
 
 describe("base64 round-trip", () => {
   it("recovers arbitrary bytes", () => {
@@ -37,6 +37,38 @@ describe("escapeHtml", () => {
     expect(escapeHtml('<img src=x onerror="alert(1)">'))
       .toBe("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
     expect(escapeHtml("a & b's <tag>")).toBe("a &amp; b&#39;s &lt;tag&gt;");
+  });
+});
+
+describe("linkify", () => {
+  it("wraps http(s) URLs in safe anchors", () => {
+    const out = linkify("see https://example.com/page?a=1 now");
+    expect(out).toContain('<a href="https://example.com/page?a=1" target="_blank" rel="noopener noreferrer">');
+    expect(out).toContain("see ");
+    expect(out).toContain(" now");
+  });
+
+  it("prefixes bare www. URLs with https:// in the href only", () => {
+    const out = linkify("go to www.example.com");
+    expect(out).toContain('href="https://www.example.com"');
+    expect(out).toContain(">www.example.com</a>");
+  });
+
+  it("leaves trailing punctuation outside the link", () => {
+    const out = linkify("read https://example.com/doc.");
+    expect(out).toContain('href="https://example.com/doc"');
+    expect(out).toMatch(/<\/a>\.$/);
+  });
+
+  it("escapes HTML so pasted markup cannot inject", () => {
+    const out = linkify('<img onerror=x> https://a.b/c"><script>');
+    expect(out).not.toContain("<img");
+    expect(out).not.toContain("<script>");
+    expect(out).toContain("&lt;img");
+  });
+
+  it("returns plain escaped text when no URL present", () => {
+    expect(linkify("just words & things")).toBe("just words &amp; things");
   });
 });
 

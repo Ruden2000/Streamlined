@@ -21,6 +21,9 @@ use tauri_plugin_notification::NotificationExt;
 static WINDOW_VISIBLE: AtomicBool = AtomicBool::new(true);
 // set only by the tray "Quit" item, so window-close keeps the app running.
 static QUITTING: AtomicBool = AtomicBool::new(false);
+// true when launched by the OS at sign-in (--hidden): the webview boots just
+// long enough to hand the room to the helper, then retires to the tray.
+static LAUNCHED_HIDDEN: AtomicBool = AtomicBool::new(false);
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -154,6 +157,40 @@ fn open_external(url: String) -> Result<(), String> {
     }
 }
 
+// ---- startup launch (autostart) ----------------------------------------------
+
+#[tauri::command]
+fn get_autostart(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_autostart(app: AppHandle, enable: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let al = app.autolaunch();
+    if enable {
+        al.enable().map_err(|e| e.to_string())
+    } else {
+        al.disable().map_err(|e| e.to_string())
+    }
+}
+
+// Did the OS launch us at sign-in? (--hidden is passed by the autostart entry.)
+#[tauri::command]
+fn launch_hidden() -> bool {
+    LAUNCHED_HIDDEN.load(Ordering::Relaxed)
+}
+
+// Close the main window (webview destroyed, memory freed); tray + helper live on.
+#[tauri::command]
+fn retire_to_tray(app: AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        WINDOW_VISIBLE.store(false, Ordering::Relaxed);
+        let _ = w.close();
+    }
+}
+
 // ---- window/tray helpers ----------------------------------------------------
 
 fn show_main(app: &AppHandle) {
@@ -188,13 +225,21 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
         .manage(Helper::default())
         .invoke_handler(tauri::generate_handler![
             set_active_room,
             get_active_room,
             clear_active_room,
             run_update,
-            open_external
+            open_external,
+            get_autostart,
+            set_autostart,
+            launch_hidden,
+            retire_to_tray
         ])
         .setup(|app| {
             if cfg!(debug_assertions) {
@@ -230,6 +275,16 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Autostart boot: keep the window hidden. The webview loads, rejoins
+            // the network, hands it to the helper, then calls retire_to_tray.
+            if std::env::args().any(|a| a == "--hidden") {
+                LAUNCHED_HIDDEN.store(true, Ordering::Relaxed);
+                WINDOW_VISIBLE.store(false, Ordering::Relaxed);
+                if let Some(w) = app.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+            }
 
             attach_close_to_tray(handle);
             Ok(())

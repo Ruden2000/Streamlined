@@ -183,6 +183,24 @@ select.target {
 .badge.scan { background: color-mix(in srgb, var(--good) 14%, transparent); color: var(--good); }
 .badge.blocked { background: var(--danger-soft); color: var(--danger); }
 
+/* ---- synced clipboard ---- */
+.clip-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.clip-head h2 { margin: 0; }
+.clip-input {
+  width: 100%; resize: vertical; min-height: 64px;
+  padding: 12px 14px; border-radius: 12px; border: 1px solid var(--border);
+  background: var(--surface-2); color: var(--text);
+  font-family: var(--sans); font-size: 14px; line-height: 1.5;
+}
+.clip-input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+.clip-view {
+  margin-top: 10px; padding: 10px 12px; border-radius: 12px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  font-size: 14px; line-height: 1.5; word-break: break-word; white-space: pre-wrap;
+}
+.clip-view a { color: var(--accent); font-weight: 600; text-decoration: underline; }
+.clip-view .clip-meta { display: block; font-size: 11px; color: var(--text-muted); margin-bottom: 4px; white-space: normal; }
+
 /* ---- tabs ---- */
 .tabs { display: flex; gap: 4px; padding: 4px; background: var(--surface-2); border-radius: 12px; border: 1px solid var(--border); margin-bottom: 14px; }
 .tab { flex: 1; text-align: center; padding: 8px; border-radius: 9px; font-size: 13px; font-weight: 600; color: var(--text-muted); cursor: pointer; border: none; background: transparent; position: relative; }

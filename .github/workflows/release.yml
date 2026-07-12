@@ -37,6 +37,10 @@ jobs:
             ## Streamlined ${{ github.ref_name }}
 
             ### New in this release
+            - **Synced clipboard** — paste text on one device and it appears on every linked device instantly, over the direct encrypted peer connection (never a server). Pasted links become clickable everywhere.
+            - **Launch at startup (desktop)** — optional; first launch asks once. Starts hidden in the tray using minimal memory and re-links your network automatically.
+            - **Automatic re-linking** — reopening the app rejoins your last network on every platform; no need to re-enter the code.
+            - **Closed-app notifications on Android APK** — via Firebase Cloud Messaging (in addition to the existing Web Push for PWAs/iOS and the desktop tray helper).
             - **Cross-device notifications** — when a linked device sends a file, your other paired devices are alerted with the filename; tap to open the app to it.
             - **In-app updates + rollback** — check, update, or roll back from **Settings → Updates**; no manual redownload.
             - **Runs light in the background (desktop)** — see below.

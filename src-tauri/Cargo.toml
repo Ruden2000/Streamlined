@@ -26,6 +26,7 @@ tauri-plugin-log = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-autostart = "2"
 # Minimal background helper: one WebSocket to the signaling server, no webview.
 tokio = { version = "1", features = ["time", "sync"] }
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }

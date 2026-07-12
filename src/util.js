@@ -11,6 +11,20 @@ export const fmtTime = (t) => { const d = new Date(t), now = Date.now(); const d
 export const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36));
 export function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
+/* escape, then turn http(s)/www URLs into safe clickable anchors.
+   Trailing sentence punctuation is left outside the link. */
+export function linkify(text) {
+  const esc = escapeHtml(text);
+  return esc.replace(/\b(?:https?:\/\/|www\.)[^\s<>]+/g, (m) => {
+    const trail = /[.,!?;:)\]]+$/.exec(m);
+    const url = trail ? m.slice(0, -trail[0].length) : m;
+    const rest = trail ? trail[0] : "";
+    if (!url) return m;
+    const href = url.startsWith("www.") ? "https://" + url : url;
+    return '<a href="' + href + '" target="_blank" rel="noopener noreferrer">' + url + "</a>" + rest;
+  });
+}
+
 /* ---------- base64 <-> bytes ---------- */
 export function bytesToB64(u8) { let s = ""; const CH = 0x8000; for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); return btoa(s); }
 export function b64ToBytes(b64) { const s = atob(b64); const u8 = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i); return u8; }

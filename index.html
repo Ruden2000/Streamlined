@@ -71,6 +71,17 @@
           </div>
         </div>
       </section>
+
+      <section class="card">
+        <div class="clip-head">
+          <h2>Synced clipboard</h2>
+          <button class="btn ghost sm" id="clipClearBtn">Clear</button>
+        </div>
+        <textarea id="clipInput" class="clip-input" rows="3" aria-label="Synced clipboard text"
+          placeholder="Paste or type here — it appears on every linked device."></textarea>
+        <div class="clip-view" id="clipView" aria-live="polite" hidden></div>
+        <p class="notice">Text syncs live to all linked devices over the direct peer connection — it never touches a server. Pasted links become clickable everywhere.</p>
+      </section>
     </div>
 
     <!-- ============ RIGHT: PANELS ============ -->
@@ -157,6 +168,13 @@
             </div>
             <label class="switch"><input type="checkbox" id="notifToggle" checked /><span class="slider"></span></label>
           </div>
+          <div class="setting" id="startupSetting" style="display:none">
+            <div class="s-meta">
+              <div class="s-label">Launch at startup</div>
+              <div class="s-desc">Start quietly in the tray when you sign in — uses minimal memory</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="startupToggle" /><span class="slider"></span></label>
+          </div>
 
           <!-- UPDATES (in-app updater + rollback) -->
           <div class="updates-block">
@@ -219,6 +237,19 @@
       </div>
       <button class="btn primary block" id="joinBtn">Link this device</button>
       <p class="notice">Tip: open a second browser tab/window and enter the same code to simulate a second device.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ============ STARTUP LAUNCH PROMPT (desktop, first run) ============ -->
+<div class="scrim" id="startupScrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="startupTitle">
+    <h3 id="startupTitle">Open Streamlined at startup?</h3>
+    <p class="sub">Launch automatically when you sign in, so your other devices can always reach this PC.</p>
+    <p class="notice">It starts quietly in the system tray and uses <strong>minimal memory</strong> — the full window stays closed, and only a tiny background helper listens for incoming files. You can change this anytime in Settings.</p>
+    <div style="display:flex;gap:10px;margin-top:14px">
+      <button class="btn ghost block" id="startupNo">Not now</button>
+      <button class="btn primary block" id="startupYes">Enable</button>
     </div>
   </div>
 </div>
