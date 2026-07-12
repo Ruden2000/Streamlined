@@ -292,9 +292,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                // Keep running in the tray unless the user explicitly quit.
-                if !QUITTING.load(Ordering::Relaxed) {
+            if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+                // code == None  -> the last window closed: stay alive in the tray.
+                // code == Some  -> an explicit exit (tray Quit, or the updater
+                // restarting into the new version): MUST be allowed through,
+                // otherwise in-place updates deadlock against the installer.
+                if code.is_none() && !QUITTING.load(Ordering::Relaxed) {
                     api.prevent_exit();
                 }
             }
