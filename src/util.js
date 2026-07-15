@@ -11,6 +11,22 @@ export const fmtTime = (t) => { const d = new Date(t), now = Date.now(); const d
 export const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36));
 export function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 
+/* does this filename look like a camera/OS default rather than a chosen name? */
+export function isGenericName(name) {
+  const base = String(name || "").replace(/\.[a-z0-9]+$/i, "").trim();
+  return /^(image|img|photo|picture|pic|screenshot|screen[ _-]?shot|scan|document|doc|file|video|movie|clip|audio|recording|untitled|new[ _-]?file|download|attachment)[ _-]?\(?\d*\)?$/i.test(base)
+      || /^(img|dsc|dcim|pxl|mvimg|gopr|vid|mov)[ _-]?\d+$/i.test(base);
+}
+
+/* first free "base<N>.ext" when `name` collides with an already-taken name */
+export function numberedName(name, taken) {
+  if (!taken.has(name)) return name;
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  const ext = dot > 0 ? name.slice(dot) : "";
+  for (let n = 1; ; n++) { const c = base + n + ext; if (!taken.has(c)) return c; }
+}
+
 /* escape, then turn http(s)/www URLs into safe clickable anchors.
    Trailing sentence punctuation is left outside the link. */
 export function linkify(text) {

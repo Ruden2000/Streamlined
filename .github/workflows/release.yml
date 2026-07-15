@@ -37,8 +37,13 @@ jobs:
             ## Streamlined ${{ github.ref_name }}
 
             ### New in this release
-            - **Website ships with every release** — the web app / PWA now deploys automatically alongside these installers, so the site always matches the latest version.
-            - Recent highlights (since 1.1.0): working in-app updates + rollback, devices stay linked permanently, synced clipboard with clickable links, launch-at-startup, automatic re-linking, closed-app notifications (Web Push + Android FCM).
+            - **Download notifications** — incoming files show a small dismissible progress box with the filename.
+            - **Clearer Transfers panel** — Active transfers up top, files from the last 24 hours below; older items live in the History tab.
+            - **Send while offline** — queue files with no device online; they send automatically when one reconnects.
+            - **Smarter file names** — optional rename prompt for generic names (image.jpg, IMG_1234…), and duplicates auto-number (image1.jpg, image2.jpg).
+            - **Preview before download** — a View button shows images, video, audio, PDFs, and text in-app.
+            - **Up to 20 downloadable copies** (size permitting) — raised from 3.
+            - **Roll Back picker** — choose any earlier version from a list.
 
             ### About background running (Windows)
             Closing Streamlined to the system tray **shuts down the main window to free its memory**. A tiny background helper keeps a single connection open purely so it can show you a **native notification with the filename** when a paired device sends a file — it never sees file contents (transfers stay peer-to-peer and encrypted). Click the notification (or the tray icon) to reopen the app. To stop it entirely, right-click the tray icon → **Quit**.

@@ -6,7 +6,7 @@
    signaling transport; the message protocol (hello/offer/chunk/complete)
    is designed to stay the same so the rest of this file is unaffected.
    ==================================================================== */
-import { $, $$, el, fmtBytes, fmtTime, uid, escapeHtml, linkify, b64ToBytes, blobToB64 } from "./util.js";
+import { $, $$, el, fmtBytes, fmtTime, uid, escapeHtml, linkify, isGenericName, numberedName, b64ToBytes, blobToB64 } from "./util.js";
 import { state, MAX_DEVICES, CHUNK } from "./state.js";
 import { QR } from "./qr.js";
 import { Crypto } from "./crypto.js";
@@ -35,11 +35,20 @@ function defaultDeviceName() { const a = ["Swift","Quiet","Bright","Cobalt","Amb
 
 async function saveHistory() {
   if (!state.network || !Crypto.ok) return;
-  try {
-    const payload = JSON.stringify({ history: state.history, incidents: state.incidents });
-    const enc = await Crypto.encrypt(state.network.key, new TextEncoder().encode(payload));
-    localStorage.setItem("sl:hist:" + state.network.id, JSON.stringify(enc));
-  } catch (e) { console.warn("history save failed", e); }
+  // "size permitting": if localStorage is full, shed the OLDEST stored file
+  // copies one at a time and retry, so metadata always survives.
+  for (;;) {
+    try {
+      const payload = JSON.stringify({ history: state.history, incidents: state.incidents });
+      const enc = await Crypto.encrypt(state.network.key, new TextEncoder().encode(payload));
+      localStorage.setItem("sl:hist:" + state.network.id, JSON.stringify(enc));
+      return;
+    } catch (e) {
+      const withBlobs = state.history.filter((h) => h.blobB64);
+      if (!withBlobs.length) { console.warn("history save failed", e); return; }
+      withBlobs[withBlobs.length - 1].blobB64 = null;
+    }
+  }
 }
 async function loadHistory() {
   if (!state.network || !Crypto.ok) return;
@@ -162,6 +171,7 @@ function leaveNetwork() {
   renderClipView(false);
   Transport.stop();
   state.network = null; state.devices.clear(); state.transfers.clear(); state.incoming.clear();
+  state.outbox = [];
   state.history = []; state.incidents = [];
   renderAll();
   toast("good", "Left network", "This device is no longer linked.");
@@ -175,7 +185,7 @@ function registerDevice(d) {
   const wasOnline = !!prev.online;
   state.devices.set(d.id, { ...prev, ...d, lastSeen: Date.now(), online: true, banned: prev.banned || false });
   if (!known || prev.name !== d.name || prev.type !== d.type) saveRoster();
-  if (!known || !wasOnline) { renderDevices(); renderTargets(); }
+  if (!known || !wasOnline) { renderDevices(); renderTargets(); flushOutbox(); }
 }
 function countActive() { return state.devices.size; }
 
@@ -251,11 +261,30 @@ function markBanned(deviceId) {
    ==================================================================== */
 async function sendSelected() {
   if (state.device.banned) { toast("danger", "Quarantined", "This device is blocked from sending."); return; }
-  const targetId = $("#targetSelect").value;
-  if (!targetId) { toast("warn", "No destination", "Link and pick a device first."); return; }
   const files = state.selected.slice();
+  if (!files.length) return;
+  const targetId = $("#targetSelect").value;
+  if (!targetId) {
+    // no device online right now — queue locally and auto-send on reconnect
+    state.selected = []; renderSelected();
+    for (const f of files) state.outbox.push({ id: uid(), file: f, ts: Date.now() });
+    renderTransfers();
+    toast("info", "Queued", files.length + " file" + (files.length > 1 ? "s" : "") + " will send automatically when a linked device comes online.");
+    return;
+  }
   state.selected = []; renderSelected();
   for (const file of files) await sendOneFile(file, targetId);
+}
+
+// Fires when a device comes online: drain the offline queue to every
+// currently-online device. Files live in memory only, so the queue does not
+// survive an app restart (noted in the queued row's status text).
+function flushOutbox() {
+  if (!state.outbox.length) return;
+  const items = state.outbox.splice(0);
+  renderTransfers();
+  toast("good", "Device online", "Sending " + items.length + " queued file" + (items.length > 1 ? "s" : "") + "…");
+  (async () => { for (const it of items) await sendOneFile(it.file, "*"); })();
 }
 
 async function sendOneFile(file, targetId) {
@@ -346,7 +375,35 @@ function acceptOffer(meta) {
   state.incoming.set(meta.tid, { meta, chunks: [], received: 0 });
   const rec = { id: meta.tid, name: meta.name, size: meta.size, type: meta.mime, dir: "received", peer: deviceName(meta.from), from: meta.from, progress: 0, status: "receiving", scan: "clean" };
   state.transfers.set(meta.tid, rec); renderTransfers();
+  showDownloadBox(rec);
   Transport.send({ type: "accept", _to: meta.from, tid: meta.tid });
+}
+
+/* ---- floating, dismissible download progress box (one per incoming file) ---- */
+function showDownloadBox(rec) {
+  const box = el("div", "dlbox");
+  box.dataset.tid = rec.id;
+  box.innerHTML =
+    '<div class="dl-head"><span class="dl-name">' + escapeHtml(rec.name) + '</span>' +
+    '<button class="x-btn dl-x" aria-label="Dismiss download notification">✕</button></div>' +
+    '<div class="bar"><i style="width:0%"></i></div>' +
+    '<div class="dl-sub">Receiving · <span class="dl-pct">0%</span></div>';
+  box.querySelector(".dl-x").onclick = () => box.remove();   // dismiss the box; the transfer continues
+  $("#dlboxes").appendChild(box);
+}
+function finishDownloadBox(tid, status) {
+  const box = document.querySelector('.dlbox[data-tid="' + CSS.escape(tid) + '"]');
+  if (!box) return;
+  const bar = box.querySelector(".bar > i"), sub = box.querySelector(".dl-sub");
+  if (status === "done") {
+    if (bar) bar.style.width = "100%";
+    if (sub) sub.textContent = "Complete";
+    setTimeout(() => { box.style.opacity = "0"; box.style.transition = "opacity .3s"; setTimeout(() => box.remove(), 300); }, 2200);
+  } else {
+    if (bar) { bar.style.width = "100%"; bar.style.background = "var(--danger)"; }
+    if (sub) sub.textContent = status === "blocked" ? "Blocked by content safety" : "Failed";
+    setTimeout(() => box.remove(), 3500);
+  }
 }
 function declineOffer(meta) { Transport.send({ type: "decline", _to: meta.from, tid: meta.tid }); }
 
@@ -374,6 +431,7 @@ async function onComplete(msg) {
   const verdict = await Scanner.scan(fileForScan);
   if (!verdict.allowed) {
     rec.status = "blocked"; rec.scan = "blocked"; renderTransfers();
+    finishDownloadBox(msg.tid, "blocked");
     logIncident(fileForScan, verdict, msg._from);
     Transport.send({ type: "ban", deviceId: msg._from });
     markBanned(msg._from);
@@ -383,6 +441,7 @@ async function onComplete(msg) {
   }
 
   rec.status = "done"; rec.progress = 100; renderTransfers();
+  finishDownloadBox(msg.tid, "done");
   const blobB64 = await blobToB64(blob);
   addHistory({ name: msg.name, size: msg.size, type: msg.mime, dir: "received", peer: rec.peer, status: "received", scan: "clean", blobB64 });
   state.incoming.delete(msg.tid);
@@ -403,8 +462,10 @@ function addHistory(entry) {
   renderHistory();
 }
 function pruneHistory() {
-  // Cap total entries to recentInMemory.
-  if (state.history.length > state.settings.recentInMemory) state.history.length = state.settings.recentInMemory;
+  // Cap total entries — never below downloadableCopies, so raising the copies
+  // slider to 20 actually keeps 20 entries around.
+  const cap = Math.max(state.settings.recentInMemory, state.settings.downloadableCopies);
+  if (state.history.length > cap) state.history.length = cap;
   // Keep downloadable blobs only for the N most recent received files.
   const recvWithBlob = state.history.filter((h) => h.dir === "received");
   let kept = 0;
@@ -421,6 +482,42 @@ function logIncident(file, verdict, deviceId) {
   setActiveTab("incidents");
   toast("danger", "Blocked: illegal content", file.name + " — transfer blocked, device quarantined, incident logged.");
 }
+/* ---- preview a stored file before downloading it ---- */
+let _previewUrl = null;
+async function previewHistory(id) {
+  const h = state.history.find((x) => x.id === id);
+  if (!h || !h.blobB64) return;
+  const blob = new Blob([b64ToBytes(h.blobB64)], { type: h.type || "application/octet-stream" });
+  const body = $("#previewBody"); body.innerHTML = "";
+  $("#previewTitle").textContent = h.name;
+  const t = h.type || "";
+  if (t.startsWith("image/")) {
+    _previewUrl = URL.createObjectURL(blob);
+    const img = el("img"); img.src = _previewUrl; img.alt = h.name; body.appendChild(img);
+  } else if (t.startsWith("video/")) {
+    _previewUrl = URL.createObjectURL(blob);
+    const v = el("video"); v.src = _previewUrl; v.controls = true; body.appendChild(v);
+  } else if (t.startsWith("audio/")) {
+    _previewUrl = URL.createObjectURL(blob);
+    const a = el("audio"); a.src = _previewUrl; a.controls = true; body.appendChild(a);
+  } else if (t === "application/pdf") {
+    _previewUrl = URL.createObjectURL(blob);
+    const f = el("iframe"); f.src = _previewUrl; f.title = "Preview of " + h.name; body.appendChild(f);
+  } else if (t.startsWith("text/") || /(json|xml|javascript|csv)/.test(t) || /\.(txt|md|csv|json|log|js|css|html?|xml)$/i.test(h.name)) {
+    const txt = await blob.text();
+    const pre = el("pre", "preview-text"); pre.textContent = txt.slice(0, 200000);   // cap huge files
+    body.appendChild(pre);
+  } else {
+    body.appendChild(el("div", "empty", "No preview available for this file type — use Download to open it."));
+  }
+  openModal($("#previewScrim"));
+}
+function closePreview() {
+  closeModal($("#previewScrim"));
+  if (_previewUrl) { URL.revokeObjectURL(_previewUrl); _previewUrl = null; }
+  $("#previewBody").innerHTML = "";
+}
+
 function downloadHistory(id) {
   const h = state.history.find((x) => x.id === id);
   if (!h || !h.blobB64) return;
@@ -501,8 +598,18 @@ function renderSelected() {
 
 function renderTransfers() {
   const list = $("#transfersList");
-  if (!state.transfers.size) { list.innerHTML = ""; list.appendChild(emptyState("list", "No active transfers", "Sent and received files will appear here while in flight.")); return; }
+  if (!state.transfers.size && !state.outbox.length) { list.innerHTML = ""; list.appendChild(emptyState("list", "No active transfers", "Sent and received files will appear here while in flight.")); return; }
   list.innerHTML = "";
+  for (const q of state.outbox) {
+    const row = el("div", "transfer queued");
+    row.innerHTML =
+      '<div class="t-head"><span class="badge dir-sent">⏸ Queued</span><span class="t-name">' + escapeHtml(q.file.name) + '</span></div>' +
+      '<div class="t-sub"><span>Waiting for a device to come online (kept until this app closes)</span><span>' + fmtBytes(q.file.size) + '</span></div>';
+    const x = el("button", "x-btn", "✕"); x.title = "Remove from queue"; x.setAttribute("aria-label", "Remove " + q.file.name + " from queue");
+    x.onclick = () => { state.outbox = state.outbox.filter((o) => o.id !== q.id); renderTransfers(); };
+    row.querySelector(".t-head").appendChild(x);
+    list.appendChild(row);
+  }
   for (const t of state.transfers.values()) {
     const dirBadge = t.dir === "sent" ? '<span class="badge dir-sent">↑ Sending</span>' : '<span class="badge dir-recv">↓ Receiving</span>';
     const statusTxt = t.status === "done" ? "Complete" : t.status === "blocked" ? "Blocked" : t.status === "declined" ? "Declined" : t.status === "error" ? "Failed" : (t.dir === "sent" ? "to " : "from ") + escapeHtml(t.peer);
@@ -540,26 +647,51 @@ function flushProgress() {
     if (bar) bar.style.width = (t.status === "blocked" ? 100 : t.progress) + "%";
     const pctEl = row.querySelector(".t-pct");
     if (pctEl) pctEl.textContent = t.status === "blocked" ? "⛔" : t.progress + "%";
+    // mirror progress into the floating download box, if it exists
+    const box = document.querySelector('.dlbox[data-tid="' + CSS.escape(tid) + '"]');
+    if (box) {
+      const bbar = box.querySelector(".bar > i");
+      if (bbar) bbar.style.width = t.progress + "%";
+      const bpct = box.querySelector(".dl-pct");
+      if (bpct) bpct.textContent = t.progress + "%";
+    }
   }
   _dirtyTransfers.clear();
   if (needFull) renderTransfers();
 }
 
-function renderHistory() {
-  const list = $("#historyList"); list.innerHTML = "";
-  $("#dlCountLabel").textContent = state.settings.downloadableCopies;
-  if (!state.history.length) { list.appendChild(emptyState("clock", "No history yet", "Completed transfers are logged here, encrypted on this device.")); return; }
-  for (const h of state.history) {
-    const row = el("div", "hist-row");
-    const dir = h.dir === "sent" ? '<span class="badge dir-sent">↑ Sent</span>' : '<span class="badge dir-recv">↓ Received</span>';
-    const scan = h.scan === "clean" ? '<span class="badge scan">🛡 Clean</span>' : h.scan === "unscanned" ? '<span class="badge">Unscanned</span>' : "";
-    row.innerHTML =
-      '<div class="file-ic">' + escapeHtml(fileExt(h.name)) + '</div>' +
-      '<div class="hist-meta"><div class="hist-name">' + escapeHtml(h.name) + '</div>' +
-      '<div class="hist-sub">' + dir + scan + '<span>' + fmtBytes(h.size) + '</span><span>·</span><span>' + (h.dir === "sent" ? "to " : "from ") + escapeHtml(h.peer) + '</span><span>·</span><span>' + fmtTime(h.ts) + '</span></div></div>';
-    if (h.blobB64) { const b = el("button", "btn ghost sm", "Download"); b.onclick = () => downloadHistory(h.id); row.appendChild(b); }
-    list.appendChild(row);
+function buildHistRow(h) {
+  const row = el("div", "hist-row");
+  const dir = h.dir === "sent" ? '<span class="badge dir-sent">↑ Sent</span>' : '<span class="badge dir-recv">↓ Received</span>';
+  const scan = h.scan === "clean" ? '<span class="badge scan">🛡 Clean</span>' : h.scan === "unscanned" ? '<span class="badge">Unscanned</span>' : "";
+  row.innerHTML =
+    '<div class="file-ic">' + escapeHtml(fileExt(h.name)) + '</div>' +
+    '<div class="hist-meta"><div class="hist-name">' + escapeHtml(h.name) + '</div>' +
+    '<div class="hist-sub">' + dir + scan + '<span>' + fmtBytes(h.size) + '</span><span>·</span><span>' + (h.dir === "sent" ? "to " : "from ") + escapeHtml(h.peer) + '</span><span>·</span><span>' + fmtTime(h.ts) + '</span></div></div>';
+  if (h.blobB64) {
+    const v = el("button", "btn ghost sm", "View"); v.onclick = () => previewHistory(h.id); row.appendChild(v);
+    const b = el("button", "btn ghost sm", "Download"); b.onclick = () => downloadHistory(h.id); row.appendChild(b);
   }
+  return row;
+}
+
+const DAY_MS = 24 * 3600 * 1000;
+const RECENT_MAX = 8;   // newest-first cap for the main-panel list
+
+function renderHistory() {
+  $("#dlCountLabel").textContent = state.settings.downloadableCopies;
+  const now = Date.now();
+  const recent = state.history.filter((h) => now - h.ts < DAY_MS);
+  // History tab gets everything older than 24h, plus recent overflow past the cap
+  const older = state.history.filter((h) => now - h.ts >= DAY_MS).concat(recent.slice(RECENT_MAX));
+
+  const recentList = $("#recentList"); recentList.innerHTML = "";
+  if (!recent.length) recentList.appendChild(el("div", "notice", "Nothing transferred in the past 24 hours."));
+  else for (const h of recent.slice(0, RECENT_MAX)) recentList.appendChild(buildHistRow(h));
+
+  const list = $("#historyList"); list.innerHTML = "";
+  if (!older.length) { list.appendChild(emptyState("clock", "No older history", "Transfers older than 24 hours move here from the main panel.")); return; }
+  for (const h of older) list.appendChild(buildHistRow(h));
 }
 
 function renderIncidents() {
@@ -848,26 +980,42 @@ function getPriorVersion() { try { return localStorage.getItem("sl:prevVersion")
 function updateRollbackUI() {
   const btn = $("#rollbackBtn"), actions = $("#updateActions");
   if (!btn) return;
-  const prev = getPriorVersion();
-  if (prev && prev !== APP_VERSION && semverGt(APP_VERSION, prev)) {
-    btn.style.display = "inline-flex";
-    btn.textContent = "Roll back to v" + prev;
-    if (actions) actions.style.display = "flex";
-  } else {
-    btn.style.display = "none";
-  }
+  btn.textContent = "Roll Back";
+  btn.style.display = "inline-flex";
+  if (actions) actions.style.display = "flex";
 }
-function rollback() {
-  const prev = getPriorVersion();
-  if (!prev) return;
-  const url = "https://github.com/" + UPDATE_CONFIG.repo + "/releases/tag/v" + prev;
-  if (detectShell() === "tauri") {
-    toast("info", "Rolling back", "Opening the previous version's installer…");
-    tauriInvoke("open_external", { url });
-    return;
+// "Roll Back" opens a picker listing every prior release; choosing one opens
+// that build's signed installer page.
+async function openRollbackList() {
+  const list = $("#rollbackList");
+  list.innerHTML = "";
+  list.appendChild(el("div", "notice", "Loading earlier versions…"));
+  openModal($("#rollbackScrim"));
+  try {
+    const r = await fetch(UPDATE_CONFIG.releasesApi + "?per_page=15", {
+      headers: { Accept: "application/vnd.github+json" },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const rels = (await r.json())
+      .filter((rel) => !rel.draft && !rel.prerelease)
+      .filter((rel) => semverGt(APP_VERSION, String(rel.tag_name || "").replace(/^v/, "")));
+    list.innerHTML = "";
+    if (!rels.length) { list.appendChild(el("div", "notice", "No earlier versions are available to roll back to.")); return; }
+    for (const rel of rels) {
+      const row = el("div", "rb-row");
+      const meta = el("div", "rb-meta");
+      meta.innerHTML = '<div class="rb-ver">' + escapeHtml(rel.tag_name) + '</div>' +
+        '<div class="rb-date">' + new Date(rel.published_at || rel.created_at).toLocaleDateString() + '</div>';
+      const btn = el("button", "btn ghost sm", "Get this version");
+      btn.onclick = () => { openLink(rel.html_url); closeModal($("#rollbackScrim")); };
+      row.appendChild(meta); row.appendChild(btn);
+      list.appendChild(row);
+    }
+  } catch {
+    list.innerHTML = "";
+    list.appendChild(el("div", "notice", "Couldn't load the release list — check your connection and try again."));
   }
-  toast("info", "Rolling back", "Opening the previous version…");
-  window.open(url, "_blank");
 }
 
 /* ====================================================================
@@ -895,6 +1043,8 @@ function handleModalKeydown(e) {
   if (e.key === "Escape") {
     e.preventDefault();
     if (scrim.id === "incomingScrim") { if (currentOffer) { declineOffer(currentOffer); state.pendingOffers.delete(currentOffer.tid); } closeIncoming(); }
+    else if (scrim.id === "renameScrim") settleRename(null);      // Escape = keep the default name
+    else if (scrim.id === "previewScrim") closePreview();         // revokes the object URL
     else closeModal(scrim);
     return;
   }
@@ -961,9 +1111,43 @@ function applyTheme(theme) {
 }
 
 /* ---- file selection ---- */
-function addFiles(fileList) {
-  for (const f of fileList) state.selected.push(f);
-  renderSelected();
+let _renameResolve = null;
+function promptRename(file) {
+  return new Promise((resolve) => {
+    _renameResolve = resolve;   // resolves with a new name, or null to keep
+    $("#renameSub").textContent = '"' + file.name + '" looks like a default name. Give it a clearer one? (optional)';
+    $("#renameInput").value = file.name;
+    openModal($("#renameScrim"));
+    $("#renameInput").select();
+  });
+}
+function settleRename(value) {
+  closeModal($("#renameScrim"));
+  const r = _renameResolve; _renameResolve = null;
+  if (r) r(value);
+}
+function withName(f, name) { return new File([f], name, { type: f.type, lastModified: f.lastModified }); }
+
+async function addFiles(fileList) {
+  const incoming = [...fileList];
+  const taken = new Set(state.selected.map((f) => f.name));
+  for (let f of incoming) {
+    // generic default name (image.jpg, IMG_1234, …) → offer an optional rename
+    if (isGenericName(f.name)) {
+      const newName = await promptRename(f);
+      if (newName && newName.trim() && newName.trim() !== f.name) {
+        let n = newName.trim();
+        if (!/\./.test(n) && f.name.includes(".")) n += f.name.slice(f.name.lastIndexOf("."));   // keep the extension
+        f = withName(f, n);
+      }
+    }
+    // duplicates that kept the same name get numbered: image.jpg, image1.jpg, image2.jpg…
+    const finalName = numberedName(f.name, taken);
+    if (finalName !== f.name) f = withName(f, finalName);
+    taken.add(f.name);
+    state.selected.push(f);
+    renderSelected();
+  }
   if (!state.network) toast("info", "Link a device first", "Create or enter a pairing code to choose a destination.");
 }
 
@@ -1068,7 +1252,14 @@ function init() {
   // updates panel
   $("#checkUpdateBtn").addEventListener("click", () => checkForUpdates(true));
   $("#applyUpdateBtn").addEventListener("click", applyUpdate);
-  $("#rollbackBtn").addEventListener("click", rollback);
+  $("#rollbackBtn").addEventListener("click", openRollbackList);
+  $("#rollbackClose").addEventListener("click", () => closeModal($("#rollbackScrim")));
+
+  // file preview + rename prompts
+  $("#previewClose").addEventListener("click", closePreview);
+  $("#renameKeep").addEventListener("click", () => settleRename(null));
+  $("#renameApply").addEventListener("click", () => settleRename($("#renameInput").value));
+  $("#renameInput").addEventListener("keydown", (e) => { if (e.key === "Enter") settleRename(e.target.value); });
 
   // synced clipboard
   $("#clipInput").addEventListener("input", (e) => setClipLocal(e.target.value));

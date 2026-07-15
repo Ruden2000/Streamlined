@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { bytesToB64, b64ToBytes, fmtBytes, escapeHtml, linkify, uid } from "../src/util.js";
+import { bytesToB64, b64ToBytes, fmtBytes, escapeHtml, linkify, isGenericName, numberedName, uid } from "../src/util.js";
 
 describe("base64 round-trip", () => {
   it("recovers arbitrary bytes", () => {
@@ -69,6 +69,41 @@ describe("linkify", () => {
 
   it("returns plain escaped text when no URL present", () => {
     expect(linkify("just words & things")).toBe("just words &amp; things");
+  });
+});
+
+describe("isGenericName", () => {
+  it.each([
+    ["image.jpg", true],
+    ["IMG_2043.jpg", true],
+    ["Screenshot 2026-01-01.png", false],   // dated screenshots are already specific
+    ["screenshot.png", true],
+    ["photo (2).jpg", true],
+    ["document.pdf", true],
+    ["untitled.txt", true],
+    ["DSC01234.JPG", true],
+    ["quarterly-report.pdf", false],
+    ["holiday-in-rome.mp4", false],
+    ["invoice-march.pdf", false]
+  ])("%s -> %s", (name, expected) => {
+    expect(isGenericName(name)).toBe(expected);
+  });
+});
+
+describe("numberedName", () => {
+  it("returns the name unchanged when free", () => {
+    expect(numberedName("image.jpg", new Set())).toBe("image.jpg");
+  });
+  it("numbers sequential collisions", () => {
+    const taken = new Set(["image.jpg"]);
+    const a = numberedName("image.jpg", taken); taken.add(a);
+    const b = numberedName("image.jpg", taken);
+    expect(a).toBe("image1.jpg");
+    expect(b).toBe("image2.jpg");
+  });
+  it("keeps the extension intact and handles extensionless names", () => {
+    expect(numberedName("notes.tar.gz", new Set(["notes.tar.gz"]))).toBe("notes.tar1.gz");
+    expect(numberedName("README", new Set(["README"]))).toBe("README1");
   });
 });
 

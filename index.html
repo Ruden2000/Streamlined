@@ -63,13 +63,16 @@
       </section>
 
       <section class="card">
-        <h2>Active transfers</h2>
+        <h2>Transfers</h2>
+        <div class="t-section-label">Active</div>
         <div id="transfersList">
           <div class="empty">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 12h16M4 6h16M4 18h10"/></svg>
             <div>No active transfers</div>
           </div>
         </div>
+        <div class="t-section-label">Last 24 hours</div>
+        <div id="recentList"></div>
       </section>
 
       <section class="card">
@@ -135,9 +138,9 @@
           <div class="setting">
             <div class="s-meta">
               <div class="s-label">Downloadable copies</div>
-              <div class="s-desc">Keep re-downloadable copies of the N most recent received files (max 3)</div>
+              <div class="s-desc">Keep re-downloadable copies of the N most recent received files (max 20, size permitting)</div>
             </div>
-            <input type="range" id="dlRange" min="0" max="3" step="1" />
+            <input type="range" id="dlRange" min="0" max="20" step="1" />
             <span class="rangeval" id="dlVal">3</span>
           </div>
           <div class="setting">
@@ -265,6 +268,44 @@
     </div>
   </div>
 </div>
+
+<!-- ============ RENAME PROMPT (generic default filenames) ============ -->
+<div class="scrim" id="renameScrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="renameTitle">
+    <h3 id="renameTitle">Name this file?</h3>
+    <p class="sub" id="renameSub"></p>
+    <div class="field">
+      <label for="renameInput">File name</label>
+      <input id="renameInput" style="font-family:var(--sans);letter-spacing:normal;text-transform:none" autocomplete="off" />
+    </div>
+    <div style="display:flex;gap:10px">
+      <button class="btn ghost block" id="renameKeep">Keep default</button>
+      <button class="btn primary block" id="renameApply">Rename</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ FILE PREVIEW ============ -->
+<div class="scrim" id="previewScrim">
+  <div class="modal modal-wide" role="dialog" aria-modal="true" aria-labelledby="previewTitle">
+    <button class="modal-x" id="previewClose" aria-label="Close preview">×</button>
+    <h3 id="previewTitle">Preview</h3>
+    <div id="previewBody" class="preview-body"></div>
+  </div>
+</div>
+
+<!-- ============ ROLL BACK PICKER ============ -->
+<div class="scrim" id="rollbackScrim">
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="rollbackTitle">
+    <button class="modal-x" id="rollbackClose" aria-label="Close">×</button>
+    <h3 id="rollbackTitle">Roll Back</h3>
+    <p class="sub">Pick an earlier version to reinstall.</p>
+    <div id="rollbackList"></div>
+  </div>
+</div>
+
+<!-- floating per-file download progress (dismissible) -->
+<div class="dlboxes" id="dlboxes"></div>
 
 <div class="toasts" id="toasts" role="status" aria-live="polite" aria-atomic="false"></div>
 

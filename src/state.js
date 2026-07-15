@@ -14,6 +14,7 @@ export const state = {
   channel: null,                // transport handle
   devices: new Map(),           // id -> { id, name, type, lastSeen, banned }
   selected: [],                 // File[]
+  outbox: [],                   // [{ id, file, ts }] queued sends awaiting an online device
   transfers: new Map(),         // id -> transfer record
   incoming: new Map(),          // id -> { meta, chunks:[], received }
   pendingOffers: new Map(),     // id -> offer (awaiting accept)
