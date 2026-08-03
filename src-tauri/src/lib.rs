@@ -48,8 +48,18 @@ async fn run_helper(app: AppHandle, info: RoomInfo) {
         match tokio_tungstenite::connect_async(&url).await {
             Ok((ws, _)) => {
                 let (mut write, mut read) = ws.split();
-                let join = serde_json::json!({ "type": "join", "room": info.room, "id": info.self_id })
-                    .to_string();
+                // Join as a LISTENER under a distinct id. Using the webview's own
+                // device id here made the server route WebRTC signalling to
+                // whichever socket it found first — often this one, which drops
+                // it — so peers could never finish connecting. Listeners are
+                // excluded from the peer mesh and only receive "notify".
+                let join = serde_json::json!({
+                    "type": "join",
+                    "room": info.room,
+                    "id": format!("{}#helper", info.self_id),
+                    "role": "listener"
+                })
+                .to_string();
                 if write
                     .send(tokio_tungstenite::tungstenite::Message::Text(join))
                     .await
@@ -142,6 +152,15 @@ async fn run_update(app: AppHandle) -> Result<bool, String> {
 // it. (Silent in-place rollback is a later refinement.)
 #[tauri::command]
 fn open_external(url: String) -> Result<(), String> {
+    // This can be reached with a link pasted on ANOTHER device via the synced
+    // clipboard, so only ever hand plain http(s) URLs to the shell — never a
+    // string that could carry shell metacharacters into `cmd /C`.
+    if !(url.starts_with("https://") || url.starts_with("http://")) {
+        return Err("only http(s) links can be opened".into());
+    }
+    if url.chars().any(|c| matches!(c, '"' | '^' | '&' | '|' | '<' | '>' | '\n' | '\r')) {
+        return Err("link contains unsupported characters".into());
+    }
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")
@@ -195,14 +214,21 @@ fn retire_to_tray(app: AppHandle) {
 
 fn show_main(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
+        // restore rather than spawn: unminimize first, or a minimized window
+        // "shows" without ever appearing.
+        let _ = w.unminimize();
         let _ = w.show();
         let _ = w.set_focus();
-    } else {
-        let _ = WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
-            .title("Streamlined")
-            .inner_size(1040.0, 760.0)
-            .min_inner_size(380.0, 560.0)
-            .build();
+    } else if WebviewWindowBuilder::new(app, "main", WebviewUrl::default())
+        .title("Streamlined")
+        .inner_size(1040.0, 760.0)
+        .min_inner_size(380.0, 560.0)
+        .build()
+        .is_ok()
+    {
+        // A rebuilt window is a NEW window object — re-arm the close-to-tray
+        // handler, otherwise closing it a second time bypasses the tray logic.
+        attach_close_to_tray(app);
     }
     WINDOW_VISIBLE.store(true, Ordering::Relaxed);
 }
@@ -222,6 +248,14 @@ fn attach_close_to_tray(app: &AppHandle) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Must be registered FIRST. The app deliberately outlives its window
+        // (tray + background helper), so launching it again — Start menu,
+        // desktop shortcut, autostart — used to spawn a whole second process,
+        // each adding its own tray icon. Now the second launch just restores
+        // the running one and exits.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main(app);
+        }))
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())

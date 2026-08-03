@@ -53,22 +53,30 @@ wss.on("connection", (ws) => {
       if (!roomId || !id) return;
       const room = rooms.get(roomId) || new Map();
       if (!rooms.has(roomId)) rooms.set(roomId, room);
-      if (!room.has(id) && room.size >= MAX_ROOM) { send(ws, { type: "full" }); return; }
 
+      // Listeners (the desktop tray helper) stay out of the peer mesh: no peer
+      // list, no announcements, no room slot — they only receive "notify".
+      ws.role = m.role === "listener" ? "listener" : "peer";
       ws.id = id; ws.room = roomId;
+      if (ws.role === "listener") { room.set(id, ws); return; }
+
+      if (!room.has(id) && [...room.values()].filter((w) => w.role !== "listener").length >= MAX_ROOM) {
+        send(ws, { type: "full" }); return;
+      }
       room.set(id, ws);
 
+      const peerIds = [...room.entries()].filter(([k, w]) => k !== id && w.role !== "listener").map(([k]) => k);
       // Tell the newcomer who is already here (newcomer initiates to them).
-      send(ws, { type: "peers", peers: [...room.keys()].filter((k) => k !== id) });
+      send(ws, { type: "peers", peers: peerIds });
       // Notify existing members (informational).
-      for (const [pid, pws] of room) if (pid !== id) send(pws, { type: "peer-joined", id });
+      for (const pid of peerIds) send(room.get(pid), { type: "peer-joined", id });
       console.log(`join ${id.slice(0, 6)} -> room ${roomId.slice(0, 8)} (${room.size})`);
 
     } else if (m.type === "signal") {
       const room = rooms.get(ws.room);
       if (!room) return;
       const target = room.get(m.to);
-      if (target) send(target, { type: "signal", from: ws.id, data: m.data });
+      if (target && target.role !== "listener") send(target, { type: "signal", from: ws.id, data: m.data });
     } else if (m.type === "notify") {
       // Mirror the Worker: fan out the lightweight "incoming file" notice to
       // every other member so background helpers can show a native notification.
@@ -82,7 +90,7 @@ wss.on("connection", (ws) => {
     if (ws.room && rooms.has(ws.room)) {
       const room = rooms.get(ws.room);
       room.delete(ws.id);
-      for (const [, pws] of room) send(pws, { type: "peer-left", id: ws.id });
+      if (ws.role !== "listener") for (const [, pws] of room) send(pws, { type: "peer-left", id: ws.id });
       if (room.size === 0) rooms.delete(ws.room);
       console.log(`leave ${String(ws.id).slice(0, 6)} (${room.size} left)`);
     }

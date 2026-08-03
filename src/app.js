@@ -124,6 +124,7 @@ async function startNetwork(code) {
   state.devices.clear();   // drop any previous network's roster from the UI
   state.devices.set(state.device.id, { ...state.device, lastSeen: Date.now(), online: true, banned: false, me: true });
   loadRoster();            // restore paired devices (shown Offline until they reappear)
+  graceUntil = Date.now() + PRESENCE_TIMEOUT_MS;   // give peers time to answer before judging
   presenceTimer = setInterval(heartbeat, 4000);
   // Hand the active room to the desktop background helper so it can keep
   // receiving "incoming file" notices (and show native notifications) even
@@ -146,15 +147,33 @@ async function startNetwork(code) {
   renderAll();
   return true;
 }
-function heartbeat() {
+const PRESENCE_TIMEOUT_MS = 20000;   // ~5 missed pings before a peer reads Offline
+let graceUntil = 0;                  // suppress offline-marking right after we resume
+
+function sendPing() {
   if (!state.network) return;
   Transport.send({ type: "ping", device: { id: state.device.id, name: state.device.name, type: state.device.type } });
+}
+function heartbeat() {
+  if (!state.network) return;
+  sendPing();
   const now = Date.now();
+  if (now < graceUntil) return;      // just woke up — peers haven't had a chance to answer yet
   let changed = false;
   // silent peers go Offline but STAY in the roster — pairing is permanent
   // until the user leaves the network or removes the app.
-  for (const [, d] of state.devices) { if (!d.me && d.online && now - d.lastSeen > 12000) { d.online = false; changed = true; } }
+  for (const [, d] of state.devices) { if (!d.me && d.online && now - d.lastSeen > PRESENCE_TIMEOUT_MS) { d.online = false; changed = true; } }
   if (changed) { renderDevices(); renderTargets(); }
+}
+
+/* Phones freeze JS timers while the app is backgrounded, so neither side sends
+   pings and BOTH wrongly conclude the other is gone. On resume: ping at once,
+   re-announce ourselves, and hold off marking anyone offline for one window. */
+function onResume() {
+  if (!state.network) return;
+  graceUntil = Date.now() + PRESENCE_TIMEOUT_MS;
+  sendPing();
+  Transport.send({ type: "hello", device: { id: state.device.id, name: state.device.name, type: state.device.type } });
 }
 let presenceTimer = null;
 
@@ -281,6 +300,10 @@ async function sendSelected() {
 // survive an app restart (noted in the queued row's status text).
 function flushOutbox() {
   if (!state.outbox.length) return;
+  // Only drain once somebody can actually receive, otherwise sendOneFile just
+  // re-queues each item and we churn (and spam toasts).
+  const online = [...state.devices.values()].some((d) => !d.me && !d.banned && d.online);
+  if (!online) return;
   const items = state.outbox.splice(0);
   renderTransfers();
   toast("good", "Device online", "Sending " + items.length + " queued file" + (items.length > 1 ? "s" : "") + "…");
@@ -297,10 +320,18 @@ async function sendOneFile(file, targetId) {
     markBanned(state.device.id);
     return;
   }
+  // Only ONLINE devices can receive. Sending to an offline peer produced an
+  // offer nobody answered and a record wedged at "sending" forever.
   const targets = targetId === "*"
-    ? [...state.devices.values()].filter((d) => !d.me && !d.banned).map((d) => d.id)
-    : [targetId];
-  if (!targets.length) { toast("warn", "No recipients", "No available devices to receive."); return; }
+    ? [...state.devices.values()].filter((d) => !d.me && !d.banned && d.online).map((d) => d.id)
+    : [targetId].filter((id) => { const d = state.devices.get(id); return d && d.online && !d.banned; });
+  if (!targets.length) {
+    // Re-queue instead of dropping the file on the floor.
+    state.outbox.push({ id: uid(), file, ts: Date.now() });
+    renderTransfers();
+    toast("warn", "No devices online", '"' + file.name + '" stays queued and will send when a device reconnects.');
+    return;
+  }
 
   // Tell every paired device a file is entering the network so they can surface
   // a notification. notifyAll crosses both P2P and the signaling socket, so even
@@ -310,17 +341,33 @@ async function sendOneFile(file, targetId) {
 
   for (const to of targets) {
     const tid = uid();
-    const rec = { id: tid, name: file.name, size: file.size, type: file.type || "application/octet-stream", dir: "sent", peer: deviceName(to), to, sent: 0, progress: 0, status: "sending", scan: verdict.skipped ? "unscanned" : "clean" };
-    state.transfers.set(tid, rec); renderTransfers();
+    const rec = { id: tid, name: file.name, size: file.size, type: file.type || "application/octet-stream", dir: "sent", peer: deviceName(to), to, sent: 0, progress: 0, status: "awaiting", scan: verdict.skipped ? "unscanned" : "clean" };
+    rec._buffer = file;                       // set BEFORE the offer goes out
+    state.transfers.set(tid, rec);
+    // An offer nobody answers must not hang forever — time it out so the row
+    // becomes retryable instead of a permanent ghost.
+    rec._offerTimer = setTimeout(() => failTransfer(tid, "No response from " + rec.peer), OFFER_TIMEOUT_MS);
+    renderTransfers();
     Transport.send({ type: "offer", _to: to, tid, name: rec.name, size: rec.size, mime: rec.type });
-    // wait briefly for accept (auto if receiver has auto-accept)
-    rec._buffer = file;
   }
+}
+
+const OFFER_TIMEOUT_MS = 30000;
+
+// Mark a send as failed but KEEP the file in memory so "Retry" can resend it.
+function failTransfer(tid, reason) {
+  const rec = state.transfers.get(tid);
+  if (!rec || rec.status === "done" || rec.status === "blocked") return;
+  clearTimeout(rec._offerTimer);
+  rec.status = "failed";
+  rec.error = reason || "Transfer failed";
+  renderTransfers();
 }
 
 async function onAccept(msg) {
   const rec = state.transfers.get(msg.tid);
   if (!rec || rec.dir !== "sent") return;
+  clearTimeout(rec._offerTimer);
   await streamFile(rec);
 }
 function onDecline(msg) {
@@ -344,6 +391,10 @@ async function streamFile(rec) {
       const { iv, ct } = await Crypto.encrypt(key, buf);
       // backpressure: don't outrun the DataChannel's send buffer
       while (Transport.bufferedAmount(rec.to) > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 20));
+      // If the peer vanishes mid-stream, stop instead of "sending" into a void
+      // at 100% while nothing arrives.
+      const peer = state.devices.get(rec.to);
+      if (!peer || !peer.online) throw new Error("Lost connection to " + rec.peer);
       Transport.send({ type: "chunk", _to: rec.to, tid: rec.id, iv, ct, off: offset, total });
       offset += buf.length;
       rec.sent = offset; rec.progress = Math.round((offset / total) * 100);
@@ -351,14 +402,16 @@ async function streamFile(rec) {
       await new Promise((r) => setTimeout(r, 0)); // yield to UI
     }
     Transport.send({ type: "complete", _to: rec.to, tid: rec.id, name: rec.name, size: rec.size, mime: rec.type });
-    rec.status = "done"; rec.progress = 100; renderTransfers();
+    rec.status = "done"; rec.progress = 100; rec._buffer = null; renderTransfers();
     addHistory({ name: rec.name, size: rec.size, type: rec.type, dir: "sent", peer: rec.peer, status: "sent", scan: rec.scan });
     chime();
     setTimeout(() => { state.transfers.delete(rec.id); renderTransfers(); }, 3000);
   } catch (e) {
-    console.error(e); rec.status = "error"; renderTransfers();
+    // keep _buffer so the row's Retry button can resend without re-picking
+    console.warn("send failed", e);
+    failTransfer(rec.id, e && e.message ? e.message : "Transfer failed");
     toast("danger", "Transfer failed", rec.name);
-  } finally { rec._buffer = null; }
+  }
 }
 
 /* ====================================================================
@@ -416,7 +469,14 @@ async function onChunk(msg) {
     inc.received += bytes.length;
     const rec = state.transfers.get(msg.tid);
     if (rec) { rec.progress = Math.round((inc.received / msg.total) * 100); queueProgress(msg.tid); }
-  } catch (e) { console.error("decrypt failed", e); }
+  } catch (e) {
+    // A chunk we can't decrypt means the rest is garbage — fail loudly and
+    // release the buffers instead of stalling at a partial percentage forever.
+    console.warn("decrypt failed", e);
+    state.incoming.delete(msg.tid);
+    failTransfer(msg.tid, "Could not decrypt — transfer aborted");
+    finishDownloadBox(msg.tid, "failed");
+  }
 }
 
 async function onComplete(msg) {
@@ -442,7 +502,11 @@ async function onComplete(msg) {
 
   rec.status = "done"; rec.progress = 100; renderTransfers();
   finishDownloadBox(msg.tid, "done");
-  const blobB64 = await blobToB64(blob);
+  // The file arrived intact; only the re-downloadable COPY is optional, so a
+  // read failure must not sink the whole delivery.
+  let blobB64 = null;
+  try { blobB64 = await blobToB64(blob); }
+  catch (e) { console.warn("could not store a re-downloadable copy", e); }
   addHistory({ name: msg.name, size: msg.size, type: msg.mime, dir: "received", peer: rec.peer, status: "received", scan: "clean", blobB64 });
   state.incoming.delete(msg.tid);
   chime();
@@ -563,6 +627,18 @@ function renderDevices() {
       '<div class="dv-ic">' + (DEVICE_ICONS[d.type] || DEVICE_ICONS.desktop) + '</div>' +
       '<div class="dv-meta"><div class="dv-name">' + escapeHtml(d.name) + '</div>' +
       '<div class="dv-sub">' + status + " · " + d.type + '</div></div>';
+    // Permanent pairing needs an escape hatch: a device that's gone for good
+    // would otherwise sit in the roster forever, consuming one of the 6 slots.
+    if (off) {
+      const f = el("button", "btn ghost sm", "Forget");
+      f.title = "Remove " + d.name + " from this network";
+      f.onclick = () => {
+        state.devices.delete(d.id);
+        saveRoster(); renderDevices(); renderTargets();
+        toast("good", "Device forgotten", d.name + " was removed. It can pair again with the code.");
+      };
+      row.appendChild(f);
+    }
     list.appendChild(row);
   }
 }
@@ -612,13 +688,33 @@ function renderTransfers() {
   }
   for (const t of state.transfers.values()) {
     const dirBadge = t.dir === "sent" ? '<span class="badge dir-sent">↑ Sending</span>' : '<span class="badge dir-recv">↓ Receiving</span>';
-    const statusTxt = t.status === "done" ? "Complete" : t.status === "blocked" ? "Blocked" : t.status === "declined" ? "Declined" : t.status === "error" ? "Failed" : (t.dir === "sent" ? "to " : "from ") + escapeHtml(t.peer);
-    const node = el("div", "transfer");
+    const bad = t.status === "failed" || t.status === "error";
+    const statusTxt =
+      t.status === "done" ? "Complete"
+      : t.status === "blocked" ? "Blocked"
+      : t.status === "declined" ? "Declined"
+      : bad ? escapeHtml(t.error || "Failed")
+      : t.status === "awaiting" ? "Waiting for " + escapeHtml(t.peer) + " to accept…"
+      : (t.dir === "sent" ? "to " : "from ") + escapeHtml(t.peer);
+    const node = el("div", "transfer" + (bad ? " failed" : ""));
     node.dataset.tid = t.id;
     node.innerHTML =
-      '<div class="t-head">' + dirBadge + '<span class="t-name">' + escapeHtml(t.name) + '</span><span class="t-pct">' + (t.status === "blocked" ? "⛔" : t.progress + "%") + '</span></div>' +
-      '<div class="bar"><i style="width:' + (t.status === "blocked" ? 100 : t.progress) + '%;' + (t.status === "blocked" ? "background:var(--danger)" : "") + '"></i></div>' +
+      '<div class="t-head">' + dirBadge + '<span class="t-name">' + escapeHtml(t.name) + '</span><span class="t-pct">' + (t.status === "blocked" ? "⛔" : bad ? "!" : t.progress + "%") + '</span></div>' +
+      '<div class="bar"><i style="width:' + (t.status === "blocked" || bad ? 100 : t.progress) + '%;' + (t.status === "blocked" || bad ? "background:var(--danger)" : "") + '"></i></div>' +
       '<div class="t-sub"><span>' + statusTxt + '</span><span>' + fmtBytes(t.size) + '</span></div>';
+    // A stalled or failed send is recoverable: resend it, or clear it away.
+    if (bad) {
+      const acts = el("div", "t-actions");
+      if (t.dir === "sent" && t._buffer) {
+        const r = el("button", "btn ghost sm", "Retry");
+        r.onclick = () => { const f = t._buffer, to = t.to; state.transfers.delete(t.id); renderTransfers(); sendOneFile(f, to); };
+        acts.appendChild(r);
+      }
+      const d = el("button", "btn ghost sm", "Dismiss");
+      d.onclick = () => { state.transfers.delete(t.id); renderTransfers(); };
+      acts.appendChild(d);
+      node.appendChild(acts);
+    }
     list.appendChild(node);
   }
 }
@@ -1197,6 +1293,11 @@ function init() {
 
   // dialog keyboard handling (Escape + focus trap) for any open modal
   document.addEventListener("keydown", handleModalKeydown);
+
+  // wake-from-background: re-announce presence before judging anyone offline
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") onResume(); });
+  window.addEventListener("focus", onResume);
+  window.addEventListener("online", onResume);
 
   // theme
   $("#themeBtn").addEventListener("click", () => applyTheme(state.settings.theme === "dark" ? "light" : "dark"));

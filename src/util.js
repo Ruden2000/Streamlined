@@ -44,4 +44,14 @@ export function linkify(text) {
 /* ---------- base64 <-> bytes ---------- */
 export function bytesToB64(u8) { let s = ""; const CH = 0x8000; for (let i = 0; i < u8.length; i += CH) s += String.fromCharCode.apply(null, u8.subarray(i, i + CH)); return btoa(s); }
 export function b64ToBytes(b64) { const s = atob(b64); const u8 = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u8[i] = s.charCodeAt(i); return u8; }
-export function blobToB64(blob) { return new Promise((res) => { const r = new FileReader(); r.onload = () => res(r.result.split(",")[1]); r.readAsDataURL(blob); }); }
+/* Resolves to base64, or rejects. Without the error/abort handlers a failed
+   read left the promise pending forever, hanging the whole receive path. */
+export function blobToB64(blob) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => { try { res(String(r.result).split(",")[1] || ""); } catch (e) { rej(e); } };
+    r.onerror = () => rej(r.error || new Error("file read failed"));
+    r.onabort = () => rej(new Error("file read aborted"));
+    try { r.readAsDataURL(blob); } catch (e) { rej(e); }
+  });
+}

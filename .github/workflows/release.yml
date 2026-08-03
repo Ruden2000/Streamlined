@@ -36,7 +36,13 @@ jobs:
           body: |
             ## Streamlined ${{ github.ref_name }}
 
-            ### New in this release
+            ### Fixed in this release
+            - **Devices wrongly showing Offline** — the desktop's background helper was joining your network under the same identity as the app window, so the server misrouted the connection handshake and devices could never fully link up. Helpers are now separate, and phones no longer drop offline just because the app was backgrounded.
+            - **Transfers stuck on "sending"** — files sent to a device that isn't reachable now time out with a clear reason and **Retry / Dismiss** buttons instead of hanging forever. Queued files can no longer be sent into a void.
+            - **Multiple app icons in the system tray** — opening Streamlined while it was already running started a second copy each time. It now restores the running one.
+            - **Forget a device** — remove a device that's gone for good from your network (frees one of the 6 slots).
+
+            ### Recently added
             - **Download notifications** — incoming files show a small dismissible progress box with the filename.
             - **Clearer Transfers panel** — Active transfers up top, files from the last 24 hours below; older items live in the History tab.
             - **Send while offline** — queue files with no device online; they send automatically when one reconnects.

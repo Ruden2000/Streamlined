@@ -74,13 +74,20 @@ export class SignalingRoom {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  // Peer ids only — "listener" sockets (the desktop tray helper) are deliberately
+  // excluded: they take no part in the WebRTC mesh, are not announced as peers,
+  // and must not consume a room slot. They still receive "notify" fanout.
   _ids(except) {
     return this.state.getWebSockets()
-      .map((ws) => (ws.deserializeAttachment() || {}).id)
-      .filter((id) => id && id !== except);
+      .map((ws) => ws.deserializeAttachment() || {})
+      .filter((a) => a.id && a.id !== except && a.role !== "listener")
+      .map((a) => a.id);
   }
   _byId(id) {
-    return this.state.getWebSockets().find((ws) => (ws.deserializeAttachment() || {}).id === id);
+    return this.state.getWebSockets().find((ws) => {
+      const a = ws.deserializeAttachment() || {};
+      return a.id === id && a.role !== "listener";
+    });
   }
   _send(ws, obj) { try { ws.send(JSON.stringify(obj)); } catch {} }
 
@@ -91,9 +98,11 @@ export class SignalingRoom {
     if (m.type === "join") {
       const id = String(m.id || "");
       if (!id) return;
+      const role = m.role === "listener" ? "listener" : "peer";
+      if (role === "listener") { ws.serializeAttachment({ id, role }); return; }  // no mesh, no announcements
       const others = this._ids(id);
       if (!this._byId(id) && others.length >= MAX_ROOM) { this._send(ws, { type: "full" }); return; }
-      ws.serializeAttachment({ id });
+      ws.serializeAttachment({ id, role });
       this._send(ws, { type: "peers", peers: others });
       for (const pid of others) { const t = this._byId(pid); if (t) this._send(t, { type: "peer-joined", id }); }
     } else if (m.type === "signal") {
@@ -104,7 +113,13 @@ export class SignalingRoom {
       // Fan out to live members, remember the filename for the SW to fetch,
       // and Web-Push any subscribed devices that aren't currently connected.
       const att = ws.deserializeAttachment() || {};
-      for (const pid of this._ids(att.id)) { const t = this._byId(pid); if (t) this._send(t, m); }
+      // fan out to every other socket INCLUDING listeners (tray helpers) —
+      // that is the whole point of the listener role
+      for (const other of this.state.getWebSockets()) {
+        const oa = other.deserializeAttachment() || {};
+        if (!oa.id || oa.id === att.id) continue;
+        this._send(other, m);
+      }
       await this.state.storage.put("lastNotify", { name: m.name, fromName: m.fromName, ts: Date.now() });
       const live = this._ids(att.id);
       await this._pushToSubs(att.id, live);
@@ -166,7 +181,7 @@ export class SignalingRoom {
   async webSocketError(ws) { this._announceLeave(ws); }
   _announceLeave(ws) {
     const att = ws.deserializeAttachment() || {};
-    if (!att.id) return;
+    if (!att.id || att.role === "listener") return;   // listeners were never peers
     for (const pid of this._ids(att.id)) { const t = this._byId(pid); if (t) this._send(t, { type: "peer-left", id: att.id }); }
   }
 }
