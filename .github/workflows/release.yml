@@ -37,6 +37,7 @@ jobs:
             ## Streamlined ${{ github.ref_name }}
 
             ### Fixed in this release
+            - **App looked broken/unstyled after updating** — the desktop app was running the website's offline cache, which pointed at stylesheets from the previous version. That cache no longer runs in the installed app, and any leftover copy is cleared automatically on first launch. Updates now apply cleanly every time.
             - **Devices wrongly showing Offline** — the desktop's background helper was joining your network under the same identity as the app window, so the server misrouted the connection handshake and devices could never fully link up. Helpers are now separate, and phones no longer drop offline just because the app was backgrounded.
             - **Transfers stuck on "sending"** — files sent to a device that isn't reachable now time out with a clear reason and **Retry / Dismiss** buttons instead of hanging forever. Queued files can no longer be sent into a void.
             - **Multiple app icons in the system tray** — opening Streamlined while it was already running started a second copy each time. It now restores the running one.

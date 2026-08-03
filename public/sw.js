@@ -3,11 +3,22 @@
    - Web Push: wakes a closed PWA, fetches the incoming file's name, and shows a
      native notification. File transfers themselves stay peer-to-peer (WebRTC)
      and never touch this worker. */
-const CACHE = "streamlined-v1";
+const CACHE = "streamlined-v2";
 const META = "sl-meta";
 
 self.addEventListener("install", () => self.skipWaiting());
-self.addEventListener("activate", (e) => e.waitUntil(self.clients.claim()));
+self.addEventListener("activate", (e) =>
+  e.waitUntil(
+    (async () => {
+      // Drop caches from earlier versions. Each release emits new hashed asset
+      // filenames, so keeping old caches only risks serving a page that points
+      // at stylesheets/scripts which no longer exist.
+      const keys = await caches.keys();
+      await Promise.all(keys.filter((k) => k !== CACHE && k !== META).map((k) => caches.delete(k)));
+      await self.clients.claim();
+    })()
+  )
+);
 
 /* ---- offline shell (network-first) ---- */
 self.addEventListener("fetch", (e) => {

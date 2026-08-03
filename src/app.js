@@ -1270,10 +1270,44 @@ function init() {
   const touchIcon = document.createElement("link"); touchIcon.rel = "apple-touch-icon"; touchIcon.href = "pwa-192.png"; document.head.appendChild(touchIcon);
   const iosCapable = document.createElement("meta"); iosCapable.name = "apple-mobile-web-app-capable"; iosCapable.content = "yes"; document.head.appendChild(iosCapable);
   const iosTitle = document.createElement("meta"); iosTitle.name = "apple-mobile-web-app-title"; iosTitle.content = "Streamlined"; document.head.appendChild(iosTitle);
-  // Register the SW only in production builds. In dev a network-first SW just
-  // causes stale-cache surprises, and sw.js isn't served from the source tree.
+  // Service worker: WEB/PWA ONLY, and only in production builds.
+  //
+  // It must never run inside the native shells. They already ship their assets
+  // locally, so it buys nothing — but every release gives Vite new hashed
+  // filenames, so a cached index.html would point at a stylesheet that no
+  // longer exists and the app would launch completely unstyled after an update.
+  // In dev it also causes stale-cache surprises and sw.js isn't served.
   const isProd = typeof import.meta !== "undefined" && import.meta.env && import.meta.env.PROD;
-  if (isProd && "serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch((e) => console.warn("SW register failed", e));
+  if (isProd && detectShell() === "web" && "serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js").catch((e) => console.warn("SW register failed", e));
+  } else if (detectShell() !== "web") {
+    // Repair installs that registered one before this fix: tear it down and
+    // drop its caches so the app loads the real bundled assets.
+    (async () => {
+      let removed = false;
+      try {
+        if ("serviceWorker" in navigator) {
+          const rs = await navigator.serviceWorker.getRegistrations();
+          removed = (await Promise.all(rs.map((r) => r.unregister()))).some(Boolean);
+        }
+        if (typeof caches !== "undefined") {
+          const ks = await caches.keys();
+          await Promise.all(ks.map((k) => caches.delete(k)));
+        }
+      } catch { /* nothing to clean */ }
+      // If a stale worker was still serving THIS page load, its cached asset
+      // list may already be wrong (that's the unstyled-after-update bug), so
+      // reload once — now uncontrolled — to pick up the real files.
+      if (removed && navigator.serviceWorker && navigator.serviceWorker.controller) {
+        try {
+          if (!sessionStorage.getItem("sl:swRepaired")) {
+            sessionStorage.setItem("sl:swRepaired", "1");   // guard against a reload loop
+            location.reload();
+          }
+        } catch { /* storage unavailable — skip the reload */ }
+      }
+    })();
+  }
 
   // tabs — click to select, arrow/Home/End for roving keyboard nav (ARIA tablist pattern)
   const tabEls = $$(".tab");
