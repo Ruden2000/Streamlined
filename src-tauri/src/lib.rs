@@ -176,6 +176,63 @@ fn open_external(url: String) -> Result<(), String> {
     }
 }
 
+// ---- save-to-folder ----------------------------------------------------------
+
+/// Ask the user for a destination folder. Returns None if they cancel.
+#[tauri::command]
+async fn pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog().file().pick_folder(move |p| {
+        let _ = tx.send(p);
+    });
+    let picked = rx.await.map_err(|e| e.to_string())?;
+    Ok(picked.map(|p| p.to_string()))
+}
+
+/// Write a received file into `dir`. `b64` is the file's bytes, base64-encoded.
+#[tauri::command]
+fn save_into_folder(dir: String, name: String, b64: String) -> Result<String, String> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use std::path::{Path, PathBuf};
+
+    // File names arrive from another device, so strip any directory portion —
+    // a name like "../../evil" must never escape the chosen folder.
+    let base = Path::new(&name)
+        .file_name()
+        .ok_or_else(|| "invalid file name".to_string())?
+        .to_owned();
+
+    let dir_path = PathBuf::from(&dir);
+    if !dir_path.is_dir() {
+        return Err("save folder is not available".into());
+    }
+
+    // Never overwrite: fall back to "name (2).ext", "name (3).ext", ...
+    let mut target = dir_path.join(&base);
+    if target.exists() {
+        let stem = Path::new(&base)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into());
+        let ext = Path::new(&base)
+            .extension()
+            .map(|s| format!(".{}", s.to_string_lossy()))
+            .unwrap_or_default();
+        for n in 2..10_000 {
+            let cand = dir_path.join(format!("{} ({}){}", stem, n, ext));
+            if !cand.exists() {
+                target = cand;
+                break;
+            }
+        }
+    }
+
+    let bytes = STANDARD.decode(b64.as_bytes()).map_err(|e| e.to_string())?;
+    std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
+    Ok(target.to_string_lossy().to_string())
+}
+
 // ---- startup launch (autostart) ----------------------------------------------
 
 #[tauri::command]
@@ -259,6 +316,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--hidden"]),
@@ -272,6 +330,8 @@ pub fn run() {
             open_external,
             get_autostart,
             set_autostart,
+            pick_folder,
+            save_into_folder,
             launch_hidden,
             retire_to_tray
         ])

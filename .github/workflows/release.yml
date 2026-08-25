@@ -37,6 +37,13 @@ jobs:
             ## Streamlined ${{ github.ref_name }}
 
             ### Fixed in this release
+            - **"That file's stored copy is no longer available" after receiving several files at once.** When a batch arrived, saving one file's copy could wipe out another's before it had finished being recorded — so rows offered a View/Download that could not work, and most rows lost their buttons entirely. Copies are now saved one at a time and a file being written is never cleaned up.
+
+            ### New in this release
+            - **Download all** — one button saves every file in the list, instead of clicking through them one at a time.
+            - **Choose where files are saved (desktop)** — Settings → *Save files to* lets you pick any folder on your PC, and received files are written straight there. Existing files are never overwritten; a duplicate becomes "name (2).jpg".
+
+            ### Previously fixed
             - **Devices showing as Offline even though both apps were open.** If the connection to the pairing service ever dropped — a phone locking or backgrounding, switching Wi-Fi, or a brief network blip — the app never reconnected. It kept showing "Linked" while being completely invisible to your other devices, until you restarted it. It now reconnects automatically, and immediately when you reopen the app.
             - **The status now tells the truth.** The badge reads **Reconnecting** whenever the connection is down, instead of claiming "Linked" when nothing can actually reach you.
 

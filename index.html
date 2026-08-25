@@ -78,7 +78,10 @@
             <div>No active transfers</div>
           </div>
         </div>
-        <div class="t-section-label">Last 24 hours</div>
+        <div class="t-head-row">
+          <div class="t-section-label">Last 24 hours</div>
+          <button class="btn ghost sm" id="dlAllRecentBtn" style="display:none">Download all</button>
+        </div>
         <div id="recentList"></div>
       </section>
 
@@ -121,7 +124,10 @@
         <div class="tabpane hide" data-pane="history" id="pane-history" role="tabpanel" aria-labelledby="tab-history" tabindex="0">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
             <h2 style="margin:0">Transfer history</h2>
-            <button class="btn ghost sm" id="clearHistBtn">Clear</button>
+            <div style="display:flex;gap:8px">
+              <button class="btn ghost sm" id="dlAllHistBtn" style="display:none">Download all</button>
+              <button class="btn ghost sm" id="clearHistBtn">Clear</button>
+            </div>
           </div>
           <input id="histSearch" class="hist-search" type="search" placeholder="Search by file or device…" aria-label="Search transfer history" />
           <div id="historyList"></div>
@@ -175,9 +181,19 @@
           <div class="setting">
             <div class="s-meta">
               <div class="s-label">Save received files automatically</div>
-              <div class="s-desc">Send finished files straight to your Downloads folder</div>
+              <div class="s-desc">Send finished files straight to your downloads location</div>
             </div>
             <label class="switch"><input type="checkbox" id="autoSaveToggle" /><span class="slider"></span></label>
+          </div>
+          <div class="setting" id="folderSetting" style="display:none">
+            <div class="s-meta">
+              <div class="s-label">Save files to</div>
+              <div class="s-desc" id="folderPath">Your browser's default Downloads folder</div>
+            </div>
+            <div style="display:flex;gap:8px">
+              <button class="btn ghost sm" id="pickFolderSettingBtn">Choose…</button>
+              <button class="btn ghost sm" id="clearFolderBtn" style="display:none">Reset</button>
+            </div>
           </div>
           <div class="setting">
             <div class="s-meta">

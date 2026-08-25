@@ -693,7 +693,10 @@ async function onComplete(msg) {
   finishDownloadBox(msg.tid, "done");
   // The file arrived intact; only the re-downloadable COPY is optional, so a
   // read failure must not sink the whole delivery.
-  if (state.settings.autoSave) saveBlobToDisk(blob, msg.name);
+  // A nominated folder means "always put files there"; otherwise honour the
+  // auto-save switch and use the normal download path.
+  if (state.settings.saveFolder && folderSaveAvailable()) deliverFile(blob, msg.name);
+  else if (state.settings.autoSave) saveBlobToDisk(blob, msg.name);
   const entry = addHistory({ name: msg.name, size: msg.size, type: msg.mime, dir: "received", peer: rec.peer, status: "received", scan: "clean" });
   saveCopy(entry.id, blob);   // encrypted, in IndexedDB, capped by the setting
   state.incoming.delete(msg.tid);
@@ -723,19 +726,35 @@ function addHistory(entry) {
 const COPY_MAX_BYTES = 64 * 1024 * 1024;
 function copyKey(id) { return (state.network ? state.network.id : "no-net") + ":" + id; }
 
-async function saveCopy(id, blob) {
+/* Saving a copy is: encrypt -> write -> mark -> prune. Receiving a batch runs
+   several of those at once, and a prune from one file would delete another
+   file's freshly-written record before that file had been marked as having
+   one — leaving a row that offered a copy which no longer existed. Copy work
+   is therefore serialised, and keys still being written are never pruned. */
+const _savingKeys = new Set();
+let _copyChain = Promise.resolve();
+
+function saveCopy(id, blob) {
+  _copyChain = _copyChain.then(() => saveCopyNow(id, blob)).catch(() => {});
+  return _copyChain;
+}
+
+async function saveCopyNow(id, blob) {
   if (!Store.available() || !state.network) return false;
   if (state.settings.downloadableCopies <= 0) return false;
   if (blob.size > COPY_MAX_BYTES) return false;
+  const key = copyKey(id);
+  _savingKeys.add(key);
   try {
     const bytes = new Uint8Array(await blob.arrayBuffer());
     const { iv, ct } = await Crypto.encryptRaw(state.network.key, bytes);
-    await Store.put(copyKey(id), { iv, ct, type: blob.type || "application/octet-stream" });
+    await Store.put(key, { iv, ct, type: blob.type || "application/octet-stream" });
     const h = state.history.find((x) => x.id === id);
     if (h) { h.hasCopy = true; saveHistory(); renderHistory(); }
-    pruneCopies();
+    await pruneCopies();
     return true;
   } catch (e) { console.warn("could not keep a re-downloadable copy", e); return false; }
+  finally { _savingKeys.delete(key); }
 }
 
 async function loadCopy(h) {
@@ -764,7 +783,10 @@ async function pruneCopies() {
     const all = await Store.keys();
     const prefix = (state.network ? state.network.id : "") + ":";
     for (const k of all) {
-      if (typeof k === "string" && k.startsWith(prefix) && !keep.has(k)) await Store.del(k);
+      // never sweep away a record whose own save is still running
+      if (typeof k === "string" && k.startsWith(prefix) && !keep.has(k) && !_savingKeys.has(k)) {
+        await Store.del(k);
+      }
     }
   } catch { /* ignore */ }
 }
@@ -837,12 +859,69 @@ function saveBlobToDisk(blob, name) {
   } catch (e) { console.warn("auto-save failed", e); }
 }
 
+/* ---- destination folder ----------------------------------------------------
+   On the desktop the user can nominate a real folder; received files are then
+   written straight there instead of going through the browser's download path.
+   Encoding the bytes for the bridge costs memory, so very large files still
+   use the ordinary download route. */
+const FOLDER_SAVE_MAX = 256 * 1024 * 1024;
+
+function folderSaveAvailable() { return detectShell() === "tauri"; }
+
+async function saveToFolder(blob, name) {
+  const dir = state.settings.saveFolder;
+  if (!dir || !folderSaveAvailable()) return false;
+  if (blob.size > FOLDER_SAVE_MAX) return false;
+  try {
+    const b64 = bytesToB64(new Uint8Array(await blob.arrayBuffer()));
+    await tauriInvoke("save_into_folder", { dir, name, b64 });
+    return true;
+  } catch (e) { console.warn("folder save failed", e); return false; }
+}
+
+/* Put a received file wherever the user asked for it. */
+async function deliverFile(blob, name) {
+  if (await saveToFolder(blob, name)) return "folder";
+  saveBlobToDisk(blob, name);
+  return "download";
+}
+
+async function chooseSaveFolder() {
+  if (!folderSaveAvailable()) return;
+  try {
+    const dir = await tauriInvoke("pick_folder");
+    if (!dir) return;                       // cancelled
+    state.settings.saveFolder = dir;
+    saveSettings(); renderSettings();
+    toast("good", "Save folder set", "Received files will be written to " + dir + ".");
+  } catch (e) { toast("danger", "Couldn't set folder", String(e)); }
+}
+
+/* Save every file in a list that still has a stored copy, one at a time so the
+   browser doesn't drop concurrent downloads. */
+async function downloadMany(entries) {
+  const withCopies = entries.filter(hasCopy);
+  if (!withCopies.length) { toast("warn", "Nothing to download", "These files no longer have stored copies."); return; }
+  let ok = 0, missing = 0;
+  toast("info", "Saving files", "Saving " + withCopies.length + " file" + (withCopies.length > 1 ? "s" : "") + "…");
+  for (const h of withCopies) {
+    const blob = await loadCopy(h);
+    if (!blob) { missing++; continue; }
+    await deliverFile(blob, h.name);
+    ok++;
+    await new Promise((r) => setTimeout(r, 250));   // let each one settle
+  }
+  if (ok) toast("good", "Saved", ok + " file" + (ok > 1 ? "s" : "") + " saved" + (state.settings.saveFolder && folderSaveAvailable() ? " to " + state.settings.saveFolder : "") + ".");
+  if (missing) toast("warn", "Some copies unavailable", missing + " file" + (missing > 1 ? "s" : "") + " no longer had a stored copy.");
+}
+
 async function downloadHistory(id) {
   const h = state.history.find((x) => x.id === id);
   if (!h || !hasCopy(h)) return;
   const blob = await loadCopy(h);
   if (!blob) { toast("warn", "Copy unavailable", "That file's stored copy is no longer available."); return; }
-  saveBlobToDisk(blob, h.name);
+  const where = await deliverFile(blob, h.name);
+  if (where === "folder") toast("good", "Saved", h.name + " → " + state.settings.saveFolder);
 }
 
 /* ====================================================================
@@ -1101,10 +1180,17 @@ function renderHistory() {
     : state.history.filter((h) => now - h.ts >= DAY_MS).concat(recent.slice(RECENT_MAX)));
 
   const recentList = $("#recentList"); recentList.innerHTML = "";
+  const recentShown = recent.slice(0, RECENT_MAX);
   if (!recent.length) recentList.appendChild(el("div", "notice", "Nothing transferred in the past 24 hours."));
-  else for (const h of recent.slice(0, RECENT_MAX)) recentList.appendChild(buildHistRow(h));
+  else for (const h of recentShown) recentList.appendChild(buildHistRow(h));
+  const recentDl = recentShown.filter(hasCopy);
+  $("#dlAllRecentBtn").style.display = recentDl.length > 1 ? "inline-flex" : "none";
+  $("#dlAllRecentBtn").onclick = () => downloadMany(recentShown);
 
   const list = $("#historyList"); list.innerHTML = "";
+  const histDl = older.filter(hasCopy);
+  $("#dlAllHistBtn").style.display = histDl.length > 1 ? "inline-flex" : "none";
+  $("#dlAllHistBtn").onclick = () => downloadMany(older);
   if (!older.length) {
     list.appendChild(histQuery
       ? emptyState("clock", "No matches", 'Nothing in history matches "' + histQuery + '".')
@@ -1141,6 +1227,11 @@ function renderSettings() {
   $("#notifToggle").checked = state.settings.notifications;
   $("#autoSaveToggle").checked = state.settings.autoSave;
   $("#shrinkToggle").checked = state.settings.shrinkImages;
+  if (folderSaveAvailable()) {
+    $("#folderSetting").style.display = "flex";
+    $("#folderPath").textContent = state.settings.saveFolder || "Your default Downloads folder";
+    $("#clearFolderBtn").style.display = state.settings.saveFolder ? "inline-flex" : "none";
+  }
   $("#curVersion").textContent = "v" + APP_VERSION;
 }
 
@@ -1805,6 +1896,11 @@ function init() {
   $("#scanToggle").addEventListener("change", (e) => { state.settings.scanning = e.target.checked; saveSettings(); if (!e.target.checked) toast("warn", "Scanning disabled", "Outgoing files will not be checked. Not recommended."); });
   $("#autoToggle").addEventListener("change", (e) => { state.settings.autoAccept = e.target.checked; saveSettings(); });
   $("#shrinkToggle").addEventListener("change", (e) => { state.settings.shrinkImages = e.target.checked; saveSettings(); });
+  $("#pickFolderSettingBtn").addEventListener("click", chooseSaveFolder);
+  $("#clearFolderBtn").addEventListener("click", () => {
+    state.settings.saveFolder = null; saveSettings(); renderSettings();
+    toast("good", "Folder cleared", "Received files will go to your default Downloads folder.");
+  });
   $("#soundToggle").addEventListener("change", (e) => { state.settings.sound = e.target.checked; saveSettings(); });
   $("#autoSaveToggle").addEventListener("change", (e) => {
     state.settings.autoSave = e.target.checked; saveSettings();

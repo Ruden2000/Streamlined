@@ -39,7 +39,9 @@ function tx(store, mode, fn) {
     const s = t.objectStore(store);
     let out;
     try { out = fn(s); } catch (e) { rej(e); return; }
-    t.oncomplete = () => res(out && out.result !== undefined ? out.result : out);
+    // IDBRequest carries the value on .result — including `undefined` for a
+    // miss, which must NOT be reported as the request object itself.
+    t.oncomplete = () => res(out && typeof out === "object" && "result" in out ? out.result : out);
     t.onerror = () => rej(t.error);
     t.onabort = () => rej(t.error);
   }));

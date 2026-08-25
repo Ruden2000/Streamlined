@@ -160,7 +160,7 @@ export class WebRTCTransport extends BaseTransport {
     this.onLive(false);
     // Never reached the server at all: fall back to same-browser messaging so
     // two tabs still work — but keep retrying the real socket underneath.
-    if (!everOpened && !this.fallback && this._retries >= 1) this._useFallback();
+    if (!everOpened && !this.fallback) this._useFallback();
     this._scheduleReconnect();
   }
 
