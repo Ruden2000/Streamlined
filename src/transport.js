@@ -29,6 +29,7 @@ class BaseTransport {
     this.selfId = opts.selfId;
     this.room = opts.room;
     this.onMessage = opts.onMessage || (() => {});
+    this.onBinary = opts.onBinary || (() => {});
     this.onOpen = opts.onOpen || (() => {});
     this.onClose = opts.onClose || (() => {});
     this.seen = new Set();
@@ -41,6 +42,9 @@ class BaseTransport {
     this.onMessage(msg);
   }
   bufferedAmount() { return 0; }
+  // Raw ArrayBuffer to one peer. File payloads take this path so they are not
+  // inflated ~33% by base64 or copied through JSON.
+  sendRaw() { return false; }
   // Default: a broadcast notify is just a normal broadcast (BroadcastChannel
   // backend). WebRTCTransport overrides this to also cross the signaling socket.
   notifyAll(msg) { this.send(msg); }
@@ -52,7 +56,14 @@ export class BroadcastTransport extends BaseTransport {
     const ch = "sl-net-" + this.room;
     if (typeof BroadcastChannel !== "undefined") {
       this.bc = new BroadcastChannel(ch);
-      this.bc.onmessage = (e) => this._deliver(e.data);
+      this.bc.onmessage = (e) => {
+        const d = e.data;
+        if (d && d.__bin) {
+          if (d._from !== this.selfId && (!d._to || d._to === this.selfId)) this.onBinary(d._from, d.buf);
+          return;
+        }
+        this._deliver(d);
+      };
       this.mode = "bc";
     } else {
       this.lsKey = "sl:bus:" + ch;
@@ -66,6 +77,11 @@ export class BroadcastTransport extends BaseTransport {
     this._stamp(msg);
     if (this.mode === "bc") this.bc.postMessage(msg);
     else localStorage.setItem(this.lsKey, JSON.stringify(msg));
+  }
+  sendRaw(peerId, buf) {
+    if (this.mode !== "bc") return false;
+    this.bc.postMessage({ __bin: 1, _from: this.selfId, _to: peerId, buf });
+    return true;
   }
   stop() {
     if (this.bc) { this.bc.close(); this.bc = null; }
@@ -110,7 +126,7 @@ export class WebRTCTransport extends BaseTransport {
     try { if (this.ws) this.ws.close(); } catch {}
     this.ws = null;
     console.warn("[transport] signaling unavailable — falling back to BroadcastChannel (same-browser only)");
-    this.fallback = new BroadcastTransport({ selfId: this.selfId, room: this.room, onMessage: this.onMessage, onOpen: this.onOpen, onClose: this.onClose });
+    this.fallback = new BroadcastTransport({ selfId: this.selfId, room: this.room, onMessage: this.onMessage, onBinary: this.onBinary, onOpen: this.onOpen, onClose: this.onClose });
     this.fallback.start();
   }
 
@@ -154,7 +170,11 @@ export class WebRTCTransport extends BaseTransport {
     peer.dc = dc;
     dc.onopen = () => { peer.open = true; this.onOpen(peerId); };
     dc.onclose = () => { peer.open = false; };
-    dc.onmessage = (e) => { try { this._deliver(JSON.parse(e.data)); } catch {} };
+    dc.onmessage = (e) => {
+      // Control messages are JSON strings; file payloads arrive as raw binary.
+      if (typeof e.data === "string") { try { this._deliver(JSON.parse(e.data)); } catch {} }
+      else this.onBinary(peerId, e.data);
+    };
   }
 
   async _handleSignal(from, data) {
@@ -207,6 +227,13 @@ export class WebRTCTransport extends BaseTransport {
     const data = JSON.stringify(msg);
     for (const p of this.peers.values()) if (p.open) p.dc.send(data);
     if (this.ws && this.ws.readyState === this.ws.OPEN) this.ws.send(data);
+  }
+
+  sendRaw(peerId, buf) {
+    if (this.fallback) return this.fallback.sendRaw(peerId, buf);
+    const p = this.peers.get(peerId);
+    if (!p || !p.open || !p.dc) return false;
+    try { p.dc.send(buf); return true; } catch { return false; }
   }
 
   bufferedAmount(peerId) {

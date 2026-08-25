@@ -37,6 +37,10 @@ jobs:
             ## Streamlined ${{ github.ref_name }}
 
             ### New in this release
+            - **Much faster transfers** — file data now travels as raw binary instead of being text-encoded, removing about a third of the bytes on the wire and a lot of processing on both ends. Devices on older versions still work; they just use the old path.
+            - **Big files no longer eat your memory** — incoming files are written into disk-backed storage as they arrive instead of being held whole in RAM, so large videos no longer risk taking the app down.
+            - **Interrupted transfers resume** — if a transfer drops, retrying continues from where it stopped instead of starting over.
+            - **Stored copies actually work now** — re-downloadable copies moved from a ~5 MB browser limit to proper local storage (gigabytes), so the "keep the most recent N files" setting does what it says. Copies are still encrypted.
             - **Paste to send** — copy a screenshot or a file anywhere, press <kbd>Ctrl</kbd>+<kbd>V</kbd> in Streamlined, and it's queued to send. No file dialog.
             - **Send a whole folder** — drop a folder in (or use *Send a folder*); every file comes across with its folder path kept in the name.
             - **Auto-save received files** — turn it on in Settings and incoming files go straight to your Downloads folder.

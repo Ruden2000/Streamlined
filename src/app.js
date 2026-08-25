@@ -6,13 +6,14 @@
    signaling transport; the message protocol (hello/offer/chunk/complete)
    is designed to stay the same so the rest of this file is unaffected.
    ==================================================================== */
-import { $, $$, el, fmtBytes, fmtTime, uid, escapeHtml, linkify, isGenericName, numberedName, b64ToBytes, blobToB64 } from "./util.js";
+import { $, $$, el, fmtBytes, fmtTime, uid, escapeHtml, linkify, isGenericName, numberedName, bytesToB64, b64ToBytes, blobToB64 } from "./util.js";
 import { state, MAX_DEVICES, CHUNK } from "./state.js";
 import { QR } from "./qr.js";
 import { Crypto } from "./crypto.js";
 import { Scanner } from "./scanner.js";
 import { createTransport } from "./transport.js";
 import { CONFIG, fetchIceServers, APP_VERSION, UPDATE_CONFIG, VAPID_PUBLIC, SITE_URL } from "./config.js";
+import { Store } from "./store.js";
 
 /* ---------- persistence (device identity + settings are unencrypted;
               history is encrypted with the network key) ---------- */
@@ -80,6 +81,7 @@ const Transport = {
       signalingUrl: CONFIG.signalingUrl,
       iceServers,
       onMessage: handleMessage,
+      onBinary: onBinaryFrame,
       onOpen: onPeerOpen,
       onClose: onPeerClose
     });
@@ -87,6 +89,7 @@ const Transport = {
   },
   send(msg) { if (this.active) this.active.send(msg); },
   notifyAll(msg) { if (this.active) this.active.notifyAll(msg); },
+  sendRaw(peerId, buf) { return this.active ? this.active.sendRaw(peerId, buf) : false; },
   bufferedAmount(peerId) { return this.active ? this.active.bufferedAmount(peerId) : 0; },
   stop() { if (this.active) { this.active.stop(); this.active = null; } }
 };
@@ -190,7 +193,7 @@ function leaveNetwork() {
   renderClipView(false);
   Transport.stop();
   state.network = null; state.devices.clear(); state.transfers.clear(); state.incoming.clear();
-  state.outbox = [];
+  state.outbox = []; state.partials.clear();
   state.history = []; state.incidents = [];
   renderAll();
   toast("good", "Left network", "This device is no longer linked.");
@@ -348,8 +351,43 @@ async function sendOneFile(file, targetId) {
     // becomes retryable instead of a permanent ghost.
     rec._offerTimer = setTimeout(() => failTransfer(tid, "No response from " + rec.peer), OFFER_TIMEOUT_MS);
     renderTransfers();
-    Transport.send({ type: "offer", _to: to, tid, name: rec.name, size: rec.size, mime: rec.type });
+    Transport.send({ type: "offer", _to: to, tid, fid: fileId(file), name: rec.name, size: rec.size, mime: rec.type });
   }
+}
+
+/* ====================================================================
+   BINARY WIRE FORMAT (v2)
+   --------------------------------------------------------------------
+   [uint32 LE header length][UTF-8 JSON header][raw ciphertext]
+
+   File payloads used to be base64'd into a JSON message, which inflated every
+   byte by a third and forced two extra copies. The header stays JSON (it is
+   tiny and easy to evolve); the ciphertext rides as raw bytes. Receivers
+   advertise support in their "accept", so a device on an older build simply
+   keeps getting the legacy JSON chunks.
+   ==================================================================== */
+function encodeFrame(header, payload) {
+  const hdr = new TextEncoder().encode(JSON.stringify(header));
+  const buf = new ArrayBuffer(4 + hdr.length + payload.length);
+  new DataView(buf).setUint32(0, hdr.length, true);
+  const u8 = new Uint8Array(buf);
+  u8.set(hdr, 4);
+  u8.set(payload, 4 + hdr.length);
+  return buf;
+}
+function decodeFrame(buf) {
+  if (!buf || buf.byteLength < 5) return null;
+  const hlen = new DataView(buf).getUint32(0, true);
+  if (hlen <= 0 || 4 + hlen > buf.byteLength) return null;
+  try {
+    const header = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, hlen)));
+    return { header, payload: new Uint8Array(buf, 4 + hlen) };
+  } catch { return null; }
+}
+
+// Stable per-file identity so a retry can pick up where it left off.
+function fileId(file) {
+  return [file.name, file.size, file.lastModified || 0].join("|");
 }
 
 const OFFER_TIMEOUT_MS = 30000;
@@ -369,6 +407,9 @@ async function onAccept(msg) {
   const rec = state.transfers.get(msg.tid);
   if (!rec || rec.dir !== "sent") return;
   clearTimeout(rec._offerTimer);
+  rec.bin = !!msg.bin;                                   // receiver understands binary frames
+  rec.resumeFrom = Math.max(0, Math.min(msg.resumeFrom || 0, rec.size));
+  if (rec.resumeFrom) toast("info", "Resuming", '"' + rec.name + '" continues from ' + fmtBytes(rec.resumeFrom) + ".");
   await streamFile(rec);
 }
 function onDecline(msg) {
@@ -383,20 +424,26 @@ async function streamFile(rec) {
   const file = rec._buffer;
   if (!file) return;
   const total = file.size, key = state.network.key;
-  let offset = 0, yielded = 0;
+  let offset = rec.resumeFrom || 0, yielded = 0;
   rec.status = "sending";
   try {
     while (offset < total) {
       const slice = file.slice(offset, offset + CHUNK);
       const buf = new Uint8Array(await slice.arrayBuffer());
-      const { iv, ct } = await Crypto.encrypt(key, buf);
       // backpressure: don't outrun the DataChannel's send buffer
       while (Transport.bufferedAmount(rec.to) > 4 * 1024 * 1024) await new Promise((r) => setTimeout(r, 20));
       // If the peer vanishes mid-stream, stop instead of "sending" into a void
       // at 100% while nothing arrives.
       const peer = state.devices.get(rec.to);
       if (!peer || !peer.online) throw new Error("Lost connection to " + rec.peer);
-      Transport.send({ type: "chunk", _to: rec.to, tid: rec.id, iv, ct, off: offset, total });
+      if (rec.bin) {
+        const { iv, ct } = await Crypto.encryptRaw(key, buf);
+        const frame = encodeFrame({ t: "c", tid: rec.id, off: offset, total, iv: bytesToB64(iv) }, ct);
+        if (!Transport.sendRaw(rec.to, frame)) throw new Error("Lost connection to " + rec.peer);
+      } else {
+        const { iv, ct } = await Crypto.encrypt(key, buf);
+        Transport.send({ type: "chunk", _to: rec.to, tid: rec.id, iv, ct, off: offset, total });
+      }
       offset += buf.length;
       rec.sent = offset; rec.progress = Math.round((offset / total) * 100);
       queueProgress(rec.id);
@@ -423,7 +470,7 @@ async function streamFile(rec) {
    ==================================================================== */
 async function onOffer(msg) {
   if (state.device.banned) return;
-  const meta = { tid: msg.tid, name: msg.name, size: msg.size, mime: msg.mime, from: msg._from };
+  const meta = { tid: msg.tid, fid: msg.fid || null, name: msg.name, size: msg.size, mime: msg.mime, from: msg._from };
   if (state.settings.autoAccept) { acceptOffer(meta); return; }
   state.pendingOffers.set(msg.tid, meta);
   // Only one prompt fits on screen. A second offer used to overwrite the first,
@@ -441,6 +488,7 @@ function armReceiveWatchdog(tid) {
   clearTimeout(inc._stall);
   inc._stall = setTimeout(() => {
     if (!state.incoming.has(tid)) return;
+    stashPartial(tid);                    // keep bytes so a retry can resume
     state.incoming.delete(tid);
     failTransfer(tid, "Sender stopped responding");
     finishDownloadBox(tid, "failed");
@@ -452,12 +500,27 @@ function clearReceiveWatchdog(tid) {
 }
 
 function acceptOffer(meta) {
-  state.incoming.set(meta.tid, { meta, chunks: [], received: 0 });
+  // Reuse anything already received for this same file, so an interrupted
+  // transfer continues instead of starting from zero.
+  const part = meta.fid ? state.partials.get(meta.fid) : null;
+  state.incoming.set(meta.tid, {
+    meta,
+    fid: meta.fid || null,
+    blob: part ? part.blob : null,        // bytes already folded to disk-backed storage
+    pending: [],
+    pendingBytes: 0,
+    ordered: part ? part.ordered !== false : true,
+    received: part ? part.received : 0
+  });
   const rec = { id: meta.tid, name: meta.name, size: meta.size, type: meta.mime, dir: "received", peer: deviceName(meta.from), from: meta.from, progress: 0, status: "receiving", scan: "clean" };
   state.transfers.set(meta.tid, rec); renderTransfers();
   showDownloadBox(rec);
   armReceiveWatchdog(meta.tid);
-  Transport.send({ type: "accept", _to: meta.from, tid: meta.tid });
+  Transport.send({
+    type: "accept", _to: meta.from, tid: meta.tid,
+    bin: 1,                                   // this build understands binary frames
+    resumeFrom: (part ? part.received : 0)
+  });
 }
 
 /* ---- floating, dismissible download progress box (one per incoming file) ---- */
@@ -488,24 +551,81 @@ function finishDownloadBox(tid, status) {
 }
 function declineOffer(meta) { Transport.send({ type: "decline", _to: meta.from, tid: meta.tid }); }
 
-async function onChunk(msg) {
-  const inc = state.incoming.get(msg.tid);
+/* Keep what we already have so a retry can resume rather than restart. */
+function stashPartial(tid) {
+  const inc = state.incoming.get(tid);
+  if (!inc || !inc.fid || inc.received <= 0) return;
+  flushPending(inc);                       // fold before parking it
+  state.partials.set(inc.fid, { blob: inc.blob, received: inc.received, ordered: inc.ordered });
+}
+
+/* Incoming bytes are folded into a Blob every few megabytes instead of being
+   kept as thousands of live typed arrays. Browsers back large Blobs with disk,
+   so a big file no longer has to fit in RAM — which is what previously made a
+   long video able to take the whole tab down. Chunks arrive in order on an
+   ordered DataChannel; if that assumption is ever violated we keep the old
+   buffer-everything-and-sort path for that transfer. */
+const FLUSH_BYTES = 4 * 1024 * 1024;
+
+function flushPending(inc) {
+  if (!inc.ordered || !inc.pending.length) return;
+  const parts = inc.pending.map((c) => c.bytes);
+  inc.blob = inc.blob ? new Blob([inc.blob, ...parts]) : new Blob(parts);
+  inc.pending = [];
+  inc.pendingBytes = 0;
+}
+
+/* Collapse whatever we hold into one Blob, whatever path we took. */
+function finalizeIncoming(inc, mime) {
+  const type = mime || "application/octet-stream";
+  if (!inc.ordered) {
+    const sorted = inc.pending.slice().sort((a, b) => a.off - b.off).map((c) => c.bytes);
+    return inc.blob ? new Blob([inc.blob, ...sorted], { type }) : new Blob(sorted, { type });
+  }
+  flushPending(inc);
+  return inc.blob ? new Blob([inc.blob], { type }) : new Blob([], { type });
+}
+
+function ingestChunk(tid, off, bytes, total) {
+  const inc = state.incoming.get(tid);
   if (!inc) return;
+  if (off !== inc.received) inc.ordered = false;   // out of order: stay on the safe path
+  inc.pending.push({ off, bytes });
+  inc.pendingBytes += bytes.length;
+  inc.received += bytes.length;
+  if (inc.ordered && inc.pendingBytes >= FLUSH_BYTES) flushPending(inc);
+  armReceiveWatchdog(tid);   // progress means the sender is alive
+  const rec = state.transfers.get(tid);
+  if (rec && total) { rec.progress = Math.round((inc.received / total) * 100); queueProgress(tid); }
+}
+
+function failReceive(tid, e) {
+  console.warn("receive failed", e);
+  stashPartial(tid);
+  state.incoming.delete(tid);
+  failTransfer(tid, "Could not decrypt — transfer aborted");
+  finishDownloadBox(tid, "failed");
+}
+
+/* Binary payload frames (v2 wire format). */
+async function onBinaryFrame(peerId, buf) {
+  const f = decodeFrame(buf);
+  if (!f || !f.header || f.header.t !== "c") return;
+  const { tid, off, total, iv } = f.header;
+  if (!state.incoming.has(tid) || !state.network) return;
+  try {
+    const bytes = await Crypto.decryptRaw(state.network.key, b64ToBytes(iv), f.payload);
+    ingestChunk(tid, off, bytes, total);
+  } catch (e) { failReceive(tid, e); }
+}
+
+/* Legacy JSON+base64 chunks, still accepted from older builds. */
+async function onChunk(msg) {
+  if (!state.incoming.has(msg.tid)) return;
   try {
     const bytes = await Crypto.decrypt(state.network.key, msg.iv, msg.ct);
-    inc.chunks.push({ off: msg.off, bytes });
-    inc.received += bytes.length;
-    armReceiveWatchdog(msg.tid);   // progress means the sender is alive
-    const rec = state.transfers.get(msg.tid);
-    if (rec) { rec.progress = Math.round((inc.received / msg.total) * 100); queueProgress(msg.tid); }
-  } catch (e) {
-    // A chunk we can't decrypt means the rest is garbage — fail loudly and
-    // release the buffers instead of stalling at a partial percentage forever.
-    console.warn("decrypt failed", e);
-    state.incoming.delete(msg.tid);
-    failTransfer(msg.tid, "Could not decrypt — transfer aborted");
-    finishDownloadBox(msg.tid, "failed");
-  }
+    ingestChunk(msg.tid, msg.off, bytes, msg.total);
+  } catch (e) { failReceive(msg.tid, e); }
 }
 
 async function onComplete(msg) {
@@ -513,8 +633,8 @@ async function onComplete(msg) {
   const rec = state.transfers.get(msg.tid);
   if (!inc || !rec) return;
   clearReceiveWatchdog(msg.tid);
-  inc.chunks.sort((a, b) => a.off - b.off);
-  const blob = new Blob(inc.chunks.map((c) => c.bytes), { type: msg.mime || "application/octet-stream" });
+  if (inc.fid) state.partials.delete(inc.fid);
+  const blob = finalizeIncoming(inc, msg.mime);
 
   // Defense in depth: receiver re-scans the reassembled plaintext.
   const fileForScan = new File([blob], msg.name, { type: msg.mime });
@@ -535,10 +655,8 @@ async function onComplete(msg) {
   // The file arrived intact; only the re-downloadable COPY is optional, so a
   // read failure must not sink the whole delivery.
   if (state.settings.autoSave) saveBlobToDisk(blob, msg.name);
-  let blobB64 = null;
-  try { blobB64 = await blobToB64(blob); }
-  catch (e) { console.warn("could not store a re-downloadable copy", e); }
-  addHistory({ name: msg.name, size: msg.size, type: msg.mime, dir: "received", peer: rec.peer, status: "received", scan: "clean", blobB64 });
+  const entry = addHistory({ name: msg.name, size: msg.size, type: msg.mime, dir: "received", peer: rec.peer, status: "received", scan: "clean" });
+  saveCopy(entry.id, blob);   // encrypted, in IndexedDB, capped by the setting
   state.incoming.delete(msg.tid);
   chime();
   toast("good", "File received", msg.name);
@@ -555,16 +673,71 @@ function addHistory(entry) {
   pruneHistory();
   saveHistory();
   renderHistory();
+  return entry;
+}
+
+/* ====================================================================
+   RE-DOWNLOADABLE COPIES (IndexedDB, encrypted)
+   ==================================================================== */
+// Whole-blob encryption needs the file in memory twice, so very large files
+// are not kept as copies; they are saved to disk at arrival instead.
+const COPY_MAX_BYTES = 64 * 1024 * 1024;
+function copyKey(id) { return (state.network ? state.network.id : "no-net") + ":" + id; }
+
+async function saveCopy(id, blob) {
+  if (!Store.available() || !state.network) return false;
+  if (state.settings.downloadableCopies <= 0) return false;
+  if (blob.size > COPY_MAX_BYTES) return false;
+  try {
+    const bytes = new Uint8Array(await blob.arrayBuffer());
+    const { iv, ct } = await Crypto.encryptRaw(state.network.key, bytes);
+    await Store.put(copyKey(id), { iv, ct, type: blob.type || "application/octet-stream" });
+    const h = state.history.find((x) => x.id === id);
+    if (h) { h.hasCopy = true; saveHistory(); renderHistory(); }
+    pruneCopies();
+    return true;
+  } catch (e) { console.warn("could not keep a re-downloadable copy", e); return false; }
+}
+
+async function loadCopy(h) {
+  if (h.blobB64) return new Blob([b64ToBytes(h.blobB64)], { type: h.type || "application/octet-stream" }); // pre-1.2 entries
+  if (!h.hasCopy || !Store.available() || !state.network) return null;
+  try {
+    const rec = await Store.get(copyKey(h.id));
+    if (!rec) return null;
+    const bytes = await Crypto.decryptRaw(state.network.key, rec.iv, rec.ct);
+    return new Blob([bytes], { type: rec.type || h.type || "application/octet-stream" });
+  } catch (e) { console.warn("stored copy unreadable", e); return null; }
+}
+function hasCopy(h) { return !!(h.blobB64 || h.hasCopy); }
+
+/* Keep only the N newest received copies; drop the rest from the store. */
+async function pruneCopies() {
+  if (!Store.available()) return;
+  const keep = new Set();
+  let kept = 0;
+  for (const h of state.history) {
+    if (h.dir !== "received" || !h.hasCopy) continue;
+    if (++kept <= state.settings.downloadableCopies) keep.add(copyKey(h.id));
+    else { h.hasCopy = false; try { await Store.del(copyKey(h.id)); } catch { /* ignore */ } }
+  }
+  try {
+    const all = await Store.keys();
+    const prefix = (state.network ? state.network.id : "") + ":";
+    for (const k of all) {
+      if (typeof k === "string" && k.startsWith(prefix) && !keep.has(k)) await Store.del(k);
+    }
+  } catch { /* ignore */ }
 }
 function pruneHistory() {
   // Cap total entries — never below downloadableCopies, so raising the copies
   // slider to 20 actually keeps 20 entries around.
   const cap = Math.max(state.settings.recentInMemory, state.settings.downloadableCopies);
   if (state.history.length > cap) state.history.length = cap;
-  // Keep downloadable blobs only for the N most recent received files.
-  const recvWithBlob = state.history.filter((h) => h.dir === "received");
+  // Legacy (pre-1.2) inline copies still respect the limit; IndexedDB copies
+  // are pruned by pruneCopies(), which also frees the underlying storage.
   let kept = 0;
-  for (const h of recvWithBlob) {
+  for (const h of state.history.filter((x) => x.dir === "received")) {
     if (h.blobB64) { kept++; if (kept > state.settings.downloadableCopies) h.blobB64 = null; }
   }
 }
@@ -581,8 +754,9 @@ function logIncident(file, verdict, deviceId) {
 let _previewUrl = null;
 async function previewHistory(id) {
   const h = state.history.find((x) => x.id === id);
-  if (!h || !h.blobB64) return;
-  const blob = new Blob([b64ToBytes(h.blobB64)], { type: h.type || "application/octet-stream" });
+  if (!h || !hasCopy(h)) return;
+  const blob = await loadCopy(h);
+  if (!blob) { toast("warn", "Copy unavailable", "That file's stored copy is no longer available."); return; }
   const body = $("#previewBody"); body.innerHTML = "";
   $("#previewTitle").textContent = h.name;
   const t = h.type || "";
@@ -624,14 +798,12 @@ function saveBlobToDisk(blob, name) {
   } catch (e) { console.warn("auto-save failed", e); }
 }
 
-function downloadHistory(id) {
+async function downloadHistory(id) {
   const h = state.history.find((x) => x.id === id);
-  if (!h || !h.blobB64) return;
-  const bytes = b64ToBytes(h.blobB64);
-  const blob = new Blob([bytes], { type: h.type || "application/octet-stream" });
-  const url = URL.createObjectURL(blob);
-  const a = el("a"); a.href = url; a.download = h.name; document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1500);
+  if (!h || !hasCopy(h)) return;
+  const blob = await loadCopy(h);
+  if (!blob) { toast("warn", "Copy unavailable", "That file's stored copy is no longer available."); return; }
+  saveBlobToDisk(blob, h.name);
 }
 
 /* ====================================================================
@@ -809,7 +981,7 @@ function buildHistRow(h) {
     '<div class="file-ic">' + escapeHtml(fileExt(h.name)) + '</div>' +
     '<div class="hist-meta"><div class="hist-name">' + escapeHtml(h.name) + '</div>' +
     '<div class="hist-sub">' + dir + scan + '<span>' + fmtBytes(h.size) + '</span><span>·</span><span>' + (h.dir === "sent" ? "to " : "from ") + escapeHtml(h.peer) + '</span><span>·</span><span>' + fmtTime(h.ts) + '</span></div></div>';
-  if (h.blobB64) {
+  if (hasCopy(h)) {
     const v = el("button", "btn ghost sm", "View"); v.onclick = () => previewHistory(h.id); row.appendChild(v);
     const b = el("button", "btn ghost sm", "Download"); b.onclick = () => downloadHistory(h.id); row.appendChild(b);
   }
@@ -1490,7 +1662,7 @@ function init() {
   // settings
   $("#deviceName").addEventListener("change", (e) => { state.device.name = e.target.value.trim() || defaultDeviceName(); saveDevice(); if (state.network) Transport.send({ type: "ping", device: state.device }); renderDevices(); });
   $("#recentRange").addEventListener("input", (e) => { state.settings.recentInMemory = +e.target.value; $("#recentVal").textContent = e.target.value; saveSettings(); pruneHistory(); renderHistory(); });
-  $("#dlRange").addEventListener("input", (e) => { state.settings.downloadableCopies = +e.target.value; $("#dlVal").textContent = e.target.value; saveSettings(); pruneHistory(); renderHistory(); });
+  $("#dlRange").addEventListener("input", (e) => { state.settings.downloadableCopies = +e.target.value; $("#dlVal").textContent = e.target.value; saveSettings(); pruneHistory(); pruneCopies(); renderHistory(); });
   $("#scanToggle").addEventListener("change", (e) => { state.settings.scanning = e.target.checked; saveSettings(); if (!e.target.checked) toast("warn", "Scanning disabled", "Outgoing files will not be checked. Not recommended."); });
   $("#autoToggle").addEventListener("change", (e) => { state.settings.autoAccept = e.target.checked; saveSettings(); });
   $("#soundToggle").addEventListener("change", (e) => { state.settings.sound = e.target.checked; saveSettings(); });
@@ -1508,7 +1680,12 @@ function init() {
       unsubscribePush();
     }
   });
-  $("#clearHistBtn").addEventListener("click", () => { state.history = []; saveHistory(); renderHistory(); toast("good", "History cleared", "Local transfer history removed."); });
+  $("#clearHistBtn").addEventListener("click", () => {
+    state.history = [];
+    if (Store.available()) Store.clear().catch(() => {});   // drop stored copies too
+    saveHistory(); renderHistory();
+    toast("good", "History cleared", "Local transfer history and stored copies removed.");
+  });
 
   // updates panel
   $("#checkUpdateBtn").addEventListener("click", () => checkForUpdates(true));

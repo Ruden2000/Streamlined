@@ -27,3 +27,7 @@ export const state = {
   // theme: null until the user picks one, so first load can follow the OS preference
   settings: { recentInMemory: 10, downloadableCopies: 3, scanning: true, autoAccept: false, sound: true, notifications: true, autoSave: false, theme: null }
 };
+
+// Partially-received files, keyed by a stable per-file id so an interrupted
+// transfer can resume where it stopped instead of starting over.
+state.partials = new Map();   // fid -> { chunks: [{off,bytes}], received }

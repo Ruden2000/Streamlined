@@ -21,6 +21,17 @@ export const Crypto = {
     const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64ToBytes(ivB64) }, key, b64ToBytes(ctB64));
     return new Uint8Array(pt);
   },
+  /* Raw-bytes variants used by the binary wire format: no base64 round-trip,
+     which keeps large payloads from being inflated ~33% and copied twice. */
+  async encryptRaw(key, bytes) {
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, bytes);
+    return { iv, ct: new Uint8Array(ct) };
+  },
+  async decryptRaw(key, iv, ct) {
+    const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, key, ct);
+    return new Uint8Array(pt);
+  },
   async sha256hex(str) {
     const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(str));
     return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
