@@ -44,7 +44,13 @@
           </div>
           <p><strong>Drop files here</strong> or click to browse</p>
           <p class="muted">Any file type · multi-select · batch transfer</p>
+          <p class="muted paste-hint">or press <kbd>Ctrl</kbd>+<kbd>V</kbd> to send whatever you copied</p>
           <input type="file" id="fileInput" multiple hidden />
+          <input type="file" id="folderInput" webkitdirectory directory multiple hidden />
+        </div>
+        <div class="dz-actions">
+          <button class="btn ghost sm" id="pickFilesBtn" type="button">Choose files</button>
+          <button class="btn ghost sm" id="pickFolderBtn" type="button">Send a folder</button>
         </div>
 
         <div class="filelist" id="selectedList"></div>
@@ -159,6 +165,13 @@
           </div>
           <div class="setting">
             <div class="s-meta">
+              <div class="s-label">Save received files automatically</div>
+              <div class="s-desc">Send finished files straight to your Downloads folder</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="autoSaveToggle" /><span class="slider"></span></label>
+          </div>
+          <div class="setting">
+            <div class="s-meta">
               <div class="s-label">Sound on complete</div>
               <div class="s-desc">Play a soft chime when a transfer finishes</div>
             </div>
@@ -239,6 +252,14 @@
         <input id="joinCode" maxlength="6" placeholder="ABC123" autocomplete="off" />
       </div>
       <button class="btn primary block" id="joinBtn">Link this device</button>
+      <button class="btn ghost block sm" id="scanBtn" style="display:none;margin-top:8px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 12h10"/></svg>
+        Scan QR code
+      </button>
+      <div id="scanWrap" class="scan-wrap" style="display:none">
+        <video id="scanVideo" playsinline muted></video>
+        <button class="btn ghost block sm" id="scanStop">Stop scanning</button>
+      </div>
       <p class="notice">Tip: open a second browser tab/window and enter the same code to simulate a second device.</p>
     </div>
   </div>

@@ -25,5 +25,5 @@ export const state = {
   update: null,                 // { latest, url, notes } from the last update check
   clip: { text: "", ts: 0, fromName: "" },  // synced clipboard (last-writer-wins by ts)
   // theme: null until the user picks one, so first load can follow the OS preference
-  settings: { recentInMemory: 10, downloadableCopies: 3, scanning: true, autoAccept: false, sound: true, notifications: true, theme: null }
+  settings: { recentInMemory: 10, downloadableCopies: 3, scanning: true, autoAccept: false, sound: true, notifications: true, autoSave: false, theme: null }
 };

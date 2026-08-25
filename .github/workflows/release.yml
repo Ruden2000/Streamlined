@@ -36,6 +36,12 @@ jobs:
           body: |
             ## Streamlined ${{ github.ref_name }}
 
+            ### New in this release
+            - **Paste to send** — copy a screenshot or a file anywhere, press <kbd>Ctrl</kbd>+<kbd>V</kbd> in Streamlined, and it's queued to send. No file dialog.
+            - **Send a whole folder** — drop a folder in (or use *Send a folder*); every file comes across with its folder path kept in the name.
+            - **Auto-save received files** — turn it on in Settings and incoming files go straight to your Downloads folder.
+            - **Scannable pairing QR** — the code now opens the app directly. Point your phone's normal camera at it and you're linked; no typing. (Android/desktop Chrome also get an in-app *Scan QR code* button.)
+
             ### Fixed in this release
             - **Faster transfers** — files now move in larger blocks with far less per-block overhead, which cuts a big chunk of time off large transfers.
             - **Receiving no longer gets stuck** — if a sender disappears mid-transfer, the receiving side now gives up cleanly instead of sitting at a partial percentage forever holding the data in memory.

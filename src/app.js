@@ -12,7 +12,7 @@ import { QR } from "./qr.js";
 import { Crypto } from "./crypto.js";
 import { Scanner } from "./scanner.js";
 import { createTransport } from "./transport.js";
-import { CONFIG, fetchIceServers, APP_VERSION, UPDATE_CONFIG, VAPID_PUBLIC } from "./config.js";
+import { CONFIG, fetchIceServers, APP_VERSION, UPDATE_CONFIG, VAPID_PUBLIC, SITE_URL } from "./config.js";
 
 /* ---------- persistence (device identity + settings are unencrypted;
               history is encrypted with the network key) ---------- */
@@ -534,6 +534,7 @@ async function onComplete(msg) {
   finishDownloadBox(msg.tid, "done");
   // The file arrived intact; only the re-downloadable COPY is optional, so a
   // read failure must not sink the whole delivery.
+  if (state.settings.autoSave) saveBlobToDisk(blob, msg.name);
   let blobB64 = null;
   try { blobB64 = await blobToB64(blob); }
   catch (e) { console.warn("could not store a re-downloadable copy", e); }
@@ -610,6 +611,17 @@ function closePreview() {
   closeModal($("#previewScrim"));
   if (_previewUrl) { URL.revokeObjectURL(_previewUrl); _previewUrl = null; }
   $("#previewBody").innerHTML = "";
+}
+
+// Hand a blob to the browser/OS as a download (used by auto-save and by the
+// Download buttons).
+function saveBlobToDisk(blob, name) {
+  try {
+    const url = URL.createObjectURL(blob);
+    const a = el("a"); a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  } catch (e) { console.warn("auto-save failed", e); }
 }
 
 function downloadHistory(id) {
@@ -848,6 +860,7 @@ function renderSettings() {
   $("#autoToggle").checked = state.settings.autoAccept;
   $("#soundToggle").checked = state.settings.sound;
   $("#notifToggle").checked = state.settings.notifications;
+  $("#autoSaveToggle").checked = state.settings.autoSave;
   $("#curVersion").textContent = "v" + APP_VERSION;
 }
 
@@ -1267,12 +1280,48 @@ function settleRename(value) {
 }
 function withName(f, name) { return new File([f], name, { type: f.type, lastModified: f.lastModified }); }
 
-async function addFiles(fileList) {
+// Preserve a dropped folder's structure by carrying the relative path in the
+// name, so "holiday/day1/a.jpg" stays distinguishable from "holiday/day2/a.jpg".
+function withPathName(f, name) {
+  return name === f.name ? f : new File([f], name, { type: f.type, lastModified: f.lastModified });
+}
+
+/* Expand a drop into a flat file list, walking directories when the browser
+   exposes them (Chromium/WebKit). Falls back to dt.files elsewhere. */
+async function filesFromDrop(dt) {
+  const entries = [...(dt.items || [])]
+    .map((i) => (i.webkitGetAsEntry ? i.webkitGetAsEntry() : null))
+    .filter(Boolean);
+  if (!entries.length) return [...dt.files];
+  const out = [];
+  const walk = async (entry, prefix) => {
+    if (entry.isFile) {
+      const f = await new Promise((res, rej) => entry.file(res, rej));
+      out.push(withPathName(f, prefix + f.name));
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      for (;;) {
+        const batch = await new Promise((res, rej) => reader.readEntries(res, rej));
+        if (!batch.length) break;
+        for (const e of batch) await walk(e, prefix + entry.name + "/");
+      }
+    }
+  };
+  for (const e of entries) await walk(e, "");
+  return out.length ? out : [...dt.files];
+}
+
+const RENAME_PROMPT_LIMIT = 5;   // never interrogate someone over a whole folder
+
+async function addFiles(fileList, opts) {
   const incoming = [...fileList];
+  // A folder drop can be hundreds of files; prompting for each would be
+  // unusable, so bulk adds skip straight to auto-numbering.
+  const askNames = !(opts && opts.noPrompt) && incoming.length <= RENAME_PROMPT_LIMIT;
   const taken = new Set(state.selected.map((f) => f.name));
   for (let f of incoming) {
     // generic default name (image.jpg, IMG_1234, …) → offer an optional rename
-    if (isGenericName(f.name)) {
+    if (askNames && isGenericName(f.name)) {
       const newName = await promptRename(f);
       if (newName && newName.trim() && newName.trim() !== f.name) {
         let n = newName.trim();
@@ -1386,7 +1435,32 @@ function init() {
   fi.addEventListener("change", () => { addFiles(fi.files); fi.value = ""; });
   ["dragenter", "dragover"].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.add("drag"); }));
   ["dragleave", "drop"].forEach((ev) => dz.addEventListener(ev, (e) => { e.preventDefault(); dz.classList.remove("drag"); }));
-  dz.addEventListener("drop", (e) => { if (e.dataTransfer?.files?.length) addFiles(e.dataTransfer.files); });
+  dz.addEventListener("drop", async (e) => {
+    if (!e.dataTransfer) return;
+    const files = await filesFromDrop(e.dataTransfer);   // walks dropped folders
+    if (files.length) addFiles(files);
+  });
+  $("#pickFilesBtn").addEventListener("click", (e) => { e.stopPropagation(); fi.click(); });
+  const folderIn = $("#folderInput");
+  $("#pickFolderBtn").addEventListener("click", (e) => { e.stopPropagation(); folderIn.click(); });
+  folderIn.addEventListener("change", () => {
+    // webkitRelativePath keeps the folder structure visible in each file name
+    const files = [...folderIn.files].map((f) => withPathName(f, f.webkitRelativePath || f.name));
+    if (files.length) addFiles(files, { noPrompt: true });
+    folderIn.value = "";
+  });
+
+  // Paste anything (a screenshot, a copied file) straight into the app.
+  document.addEventListener("paste", (e) => {
+    const t = e.target;
+    // never hijack a paste the user aimed at a text field
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    const files = [...((e.clipboardData && e.clipboardData.files) || [])];
+    if (!files.length) return;
+    e.preventDefault();
+    addFiles(files);
+    toast("good", "Added from clipboard", files.length + " file" + (files.length > 1 ? "s" : "") + " ready to send.");
+  });
 
   // send / clear
   $("#sendBtn").addEventListener("click", sendSelected);
@@ -1395,12 +1469,17 @@ function init() {
   // link modal
   const scrim = $("#linkScrim");
   $("#linkBtn").addEventListener("click", openLinkModal);
-  $("#modalClose").addEventListener("click", () => closeModal(scrim));
-  scrim.addEventListener("click", (e) => { if (e.target === scrim) closeModal(scrim); });
+  $("#modalClose").addEventListener("click", () => { stopScan(); closeModal(scrim); });
+  scrim.addEventListener("click", (e) => { if (e.target === scrim) { stopScan(); closeModal(scrim); } });
   $("#segCreate").addEventListener("click", () => { setSeg("create"); createFreshCode(); });
   $("#segJoin").addEventListener("click", () => setSeg("join"));
   $("#copyCodeBtn").addEventListener("click", () => { if (state.network) { navigator.clipboard?.writeText(state.network.code); toast("good", "Copied", "Pairing code copied to clipboard."); } });
   $("#joinBtn").addEventListener("click", doJoin);
+  if (scanSupported()) {
+    $("#scanBtn").style.display = "inline-flex";
+    $("#scanBtn").addEventListener("click", startScan);
+    $("#scanStop").addEventListener("click", stopScan);
+  }
   $("#joinCode").addEventListener("keydown", (e) => { if (e.key === "Enter") doJoin(); });
   $("#leaveBtn").addEventListener("click", leaveNetwork);
 
@@ -1415,6 +1494,10 @@ function init() {
   $("#scanToggle").addEventListener("change", (e) => { state.settings.scanning = e.target.checked; saveSettings(); if (!e.target.checked) toast("warn", "Scanning disabled", "Outgoing files will not be checked. Not recommended."); });
   $("#autoToggle").addEventListener("change", (e) => { state.settings.autoAccept = e.target.checked; saveSettings(); });
   $("#soundToggle").addEventListener("change", (e) => { state.settings.sound = e.target.checked; saveSettings(); });
+  $("#autoSaveToggle").addEventListener("change", (e) => {
+    state.settings.autoSave = e.target.checked; saveSettings();
+    if (e.target.checked) toast("good", "Auto-save on", "Received files go straight to your Downloads folder.");
+  });
   $("#notifToggle").addEventListener("change", async (e) => {
     state.settings.notifications = e.target.checked; saveSettings();
     if (e.target.checked) {
@@ -1479,6 +1562,20 @@ function init() {
   // fresh — rejoin the network the background helper is still holding.
   // Everywhere: fall back to the last-used pairing code so a relaunched app
   // (including an autostart boot) re-links without user action.
+  // Scanned or shared link: ?join=CODE joins straight away.
+  let joinParam = null;
+  try {
+    joinParam = new URLSearchParams(location.search).get("join");
+    if (joinParam) {
+      joinParam = joinParam.toUpperCase();
+      history.replaceState({}, "", location.pathname);   // don't re-join on refresh
+    }
+  } catch { /* ignore */ }
+  if (joinParam && /^[A-Z0-9]{6}$/.test(joinParam)) {
+    startNetwork(joinParam).then((ok) => { if (ok) toast("good", "Linked", "Joined network " + joinParam + "."); });
+    return;
+  }
+
   const rejoinLast = () => {
     if (state.network) return;
     let last = null;
@@ -1521,9 +1618,56 @@ async function createFreshCode() {
 function showCode(code) {
   $("#codeDisplay").textContent = code;
   // Always dark-on-white so the QR stays scannable in either theme.
-  try { QR.render($("#qrCanvas"), "https://streamlined.app/j/" + code, { scale: 5, dark: "#0f1729", light: "#ffffff" }); }
+  // Encode a link to the hosted app so ANY stock camera app can scan it and
+  // land on the join screen (the old value pointed at a domain we don't own).
+  try { QR.render($("#qrCanvas"), SITE_URL + "/?join=" + code, { scale: 5, dark: "#0f1729", light: "#ffffff" }); }
   catch (e) { console.warn("QR render failed", e); }
 }
+/* ---- QR scanning (in-app) ----
+   Uses the platform BarcodeDetector where it exists (Chromium desktop +
+   Android). Elsewhere the button stays hidden — those users can point their
+   phone's own camera app at the code instead, which the deep link supports. */
+let _scanStream = null, _scanStop = false;
+function scanSupported() { return typeof window !== "undefined" && "BarcodeDetector" in window; }
+
+function codeFromScan(raw) {
+  if (!raw) return null;
+  const m = /[?&]join=([A-Z0-9]{6})/i.exec(raw) || /^([A-Z0-9]{6})$/i.exec(raw.trim());
+  return m ? m[1].toUpperCase() : null;
+}
+
+async function startScan() {
+  if (!scanSupported()) return;
+  const video = $("#scanVideo");
+  try {
+    _scanStop = false;
+    _scanStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+    video.srcObject = _scanStream;
+    await video.play();
+    $("#scanWrap").style.display = "grid";
+    $("#scanBtn").style.display = "none";
+    const det = new window.BarcodeDetector({ formats: ["qr_code"] });
+    while (!_scanStop) {
+      try {
+        const hits = await det.detect(video);
+        const code = hits.map((h) => codeFromScan(h.rawValue)).find(Boolean);
+        if (code) { stopScan(); $("#joinCode").value = code; doJoin(); return; }
+      } catch { /* transient decode failure — keep looking */ }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  } catch (e) {
+    stopScan();
+    toast("warn", "Camera unavailable", "Allow camera access, or type the 6-character code instead.");
+  }
+}
+function stopScan() {
+  _scanStop = true;
+  if (_scanStream) { _scanStream.getTracks().forEach((t) => t.stop()); _scanStream = null; }
+  const v = $("#scanVideo"); if (v) v.srcObject = null;
+  $("#scanWrap").style.display = "none";
+  if (scanSupported()) $("#scanBtn").style.display = "inline-flex";
+}
+
 async function doJoin() {
   const code = $("#joinCode").value.trim().toUpperCase();
   if (code.length !== 6) { toast("warn", "Invalid code", "Pairing codes are 6 characters."); return; }

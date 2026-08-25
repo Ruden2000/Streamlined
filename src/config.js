@@ -9,7 +9,12 @@ const env = (typeof import.meta !== "undefined" && import.meta.env) ? import.met
 
 // Bump this in lockstep with package.json / tauri.conf.json / android versionName
 // on every release — the in-app updater compares it against the latest GitHub tag.
-export const APP_VERSION = "1.1.8";
+export const APP_VERSION = "1.1.9";
+
+// Public address of the hosted web app. QR codes encode a link to THIS origin
+// (native shells run on tauri://localhost, which no phone camera could open),
+// so scanning the code with any stock camera app opens the app ready to join.
+export const SITE_URL = "https://streamlined-3bu.pages.dev";
 
 export const UPDATE_CONFIG = {
   repo: "Ruden2000/Streamlined",
