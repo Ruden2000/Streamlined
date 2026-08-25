@@ -9,7 +9,7 @@ const env = (typeof import.meta !== "undefined" && import.meta.env) ? import.met
 
 // Bump this in lockstep with package.json / tauri.conf.json / android versionName
 // on every release — the in-app updater compares it against the latest GitHub tag.
-export const APP_VERSION = "1.1.7";
+export const APP_VERSION = "1.1.8";
 
 export const UPDATE_CONFIG = {
   repo: "Ruden2000/Streamlined",

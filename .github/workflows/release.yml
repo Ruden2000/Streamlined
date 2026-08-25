@@ -37,6 +37,11 @@ jobs:
             ## Streamlined ${{ github.ref_name }}
 
             ### Fixed in this release
+            - **Faster transfers** — files now move in larger blocks with far less per-block overhead, which cuts a big chunk of time off large transfers.
+            - **Receiving no longer gets stuck** — if a sender disappears mid-transfer, the receiving side now gives up cleanly instead of sitting at a partial percentage forever holding the data in memory.
+            - **Two files at once no longer lose one** — a second incoming file used to replace the first prompt, leaving the first stranded. Offers now queue up one after another.
+            - **Less notification noise** — the device actually receiving a file no longer gets a duplicate alert on top of its own transfer prompt.
+            - **Destination list could go blank** — picking a device that then went offline could leave the send box empty.
             - **App looked broken/unstyled after updating** — the desktop app was running the website's offline cache, which pointed at stylesheets from the previous version. That cache no longer runs in the installed app, and any leftover copy is cleared automatically on first launch. Updates now apply cleanly every time.
             - **Devices wrongly showing Offline** — the desktop's background helper was joining your network under the same identity as the app window, so the server misrouted the connection handshake and devices could never fully link up. Helpers are now separate, and phones no longer drop offline just because the app was backgrounded.
             - **Transfers stuck on "sending"** — files sent to a device that isn't reachable now time out with a clear reason and **Retry / Dismiss** buttons instead of hanging forever. Queued files can no longer be sent into a void.

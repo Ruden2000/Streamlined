@@ -337,7 +337,7 @@ async function sendOneFile(file, targetId) {
   // a notification. notifyAll crosses both P2P and the signaling socket, so even
   // a device sitting in its minimal tray helper (no P2P) gets alerted. The
   // transport drops our own echo, so the sender is never notified.
-  Transport.notifyAll({ type: "notify", name: file.name, size: file.size, mime: file.type || "application/octet-stream", fromName: state.device.name });
+  Transport.notifyAll({ type: "notify", name: file.name, size: file.size, mime: file.type || "application/octet-stream", fromName: state.device.name, toIds: targets });
 
   for (const to of targets) {
     const tid = uid();
@@ -353,6 +353,7 @@ async function sendOneFile(file, targetId) {
 }
 
 const OFFER_TIMEOUT_MS = 30000;
+const YIELD_EVERY = 8;          // repaint roughly every 256 KB of payload
 
 // Mark a send as failed but KEEP the file in memory so "Retry" can resend it.
 function failTransfer(tid, reason) {
@@ -382,7 +383,7 @@ async function streamFile(rec) {
   const file = rec._buffer;
   if (!file) return;
   const total = file.size, key = state.network.key;
-  let offset = 0;
+  let offset = 0, yielded = 0;
   rec.status = "sending";
   try {
     while (offset < total) {
@@ -399,7 +400,10 @@ async function streamFile(rec) {
       offset += buf.length;
       rec.sent = offset; rec.progress = Math.round((offset / total) * 100);
       queueProgress(rec.id);
-      await new Promise((r) => setTimeout(r, 0)); // yield to UI
+      // Yield to the UI every few chunks instead of every one: browsers clamp
+      // nested setTimeout(0) to ~4 ms, so per-chunk yielding was costing more
+      // time than the encryption and the send combined.
+      if ((++yielded % YIELD_EVERY) === 0) await new Promise((r) => setTimeout(r, 0));
     }
     Transport.send({ type: "complete", _to: rec.to, tid: rec.id, name: rec.name, size: rec.size, mime: rec.type });
     rec.status = "done"; rec.progress = 100; rec._buffer = null; renderTransfers();
@@ -422,13 +426,37 @@ async function onOffer(msg) {
   const meta = { tid: msg.tid, name: msg.name, size: msg.size, mime: msg.mime, from: msg._from };
   if (state.settings.autoAccept) { acceptOffer(meta); return; }
   state.pendingOffers.set(msg.tid, meta);
-  showIncomingPrompt(meta);
+  // Only one prompt fits on screen. A second offer used to overwrite the first,
+  // which then could never be accepted or declined - it just timed out on the
+  // sender. Extra offers now wait their turn.
+  if (!currentOffer) showIncomingPrompt(meta);
 }
+// A sender that dies mid-transfer used to leave the receiver stuck at a
+// partial percentage forever, pinning every received chunk in memory. Each
+// incoming file now carries a watchdog that is refreshed on every chunk.
+const RECEIVE_STALL_MS = 45000;
+function armReceiveWatchdog(tid) {
+  const inc = state.incoming.get(tid);
+  if (!inc) return;
+  clearTimeout(inc._stall);
+  inc._stall = setTimeout(() => {
+    if (!state.incoming.has(tid)) return;
+    state.incoming.delete(tid);
+    failTransfer(tid, "Sender stopped responding");
+    finishDownloadBox(tid, "failed");
+  }, RECEIVE_STALL_MS);
+}
+function clearReceiveWatchdog(tid) {
+  const inc = state.incoming.get(tid);
+  if (inc) clearTimeout(inc._stall);
+}
+
 function acceptOffer(meta) {
   state.incoming.set(meta.tid, { meta, chunks: [], received: 0 });
   const rec = { id: meta.tid, name: meta.name, size: meta.size, type: meta.mime, dir: "received", peer: deviceName(meta.from), from: meta.from, progress: 0, status: "receiving", scan: "clean" };
   state.transfers.set(meta.tid, rec); renderTransfers();
   showDownloadBox(rec);
+  armReceiveWatchdog(meta.tid);
   Transport.send({ type: "accept", _to: meta.from, tid: meta.tid });
 }
 
@@ -467,6 +495,7 @@ async function onChunk(msg) {
     const bytes = await Crypto.decrypt(state.network.key, msg.iv, msg.ct);
     inc.chunks.push({ off: msg.off, bytes });
     inc.received += bytes.length;
+    armReceiveWatchdog(msg.tid);   // progress means the sender is alive
     const rec = state.transfers.get(msg.tid);
     if (rec) { rec.progress = Math.round((inc.received / msg.total) * 100); queueProgress(msg.tid); }
   } catch (e) {
@@ -483,6 +512,7 @@ async function onComplete(msg) {
   const inc = state.incoming.get(msg.tid);
   const rec = state.transfers.get(msg.tid);
   if (!inc || !rec) return;
+  clearReceiveWatchdog(msg.tid);
   inc.chunks.sort((a, b) => a.off - b.off);
   const blob = new Blob(inc.chunks.map((c) => c.bytes), { type: msg.mime || "application/octet-stream" });
 
@@ -654,7 +684,10 @@ function renderTargets() {
     const o = el("option"); o.value = ""; o.textContent = anyLinked ? "No devices online" : "No devices linked";
     sel.appendChild(o);
   }
-  if (prev) sel.value = prev;
+  // Assigning a value with no matching <option> leaves the control blank, so
+  // only restore a selection that still exists; otherwise fall back to the top.
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  else sel.selectedIndex = 0;
 }
 
 function renderSelected() {
@@ -879,7 +912,11 @@ function openLink(url) {
    this path covers devices currently running or in the tray helper.)
    ==================================================================== */
 function onNotify(msg) {
-  toast("info", "Incoming file", '"' + msg.name + '" from ' + (msg.fromName || "a linked device"));
+  // The actual recipient already gets the accept prompt (or a download box), so
+  // an extra in-app toast is just noise. It still gets an OS notification when
+  // the app is in the background, which is the whole point of the alert.
+  const forMe = Array.isArray(msg.toIds) && msg.toIds.includes(state.device.id);
+  if (!forMe) toast("info", "Incoming file", '"' + msg.name + '" from ' + (msg.fromName || "a linked device"));
   showOsNotification(msg.name, msg.fromName);
 }
 function showOsNotification(name, fromName) {
@@ -1195,7 +1232,13 @@ function showIncomingPrompt(meta) {
   $("#incSub").textContent = '"' + meta.name + '" (' + fmtBytes(meta.size) + ") from " + deviceName(meta.from);
   openModal($("#incomingScrim"));
 }
-function closeIncoming() { closeModal($("#incomingScrim")); currentOffer = null; }
+function closeIncoming() {
+  closeModal($("#incomingScrim"));
+  currentOffer = null;
+  // surface the next queued offer, if any
+  const next = state.pendingOffers.values().next();
+  if (!next.done) setTimeout(() => { if (!currentOffer) showIncomingPrompt(next.value); }, 250);
+}
 
 /* ---- theme ---- */
 function applyTheme(theme) {
