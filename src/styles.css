@@ -86,6 +86,8 @@ header.topbar {
 }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-muted); }
 .pill.online .dot { background: var(--good); box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 25%, transparent); }
+.pill.reconnecting .dot { background: var(--warn); box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 25%, transparent); animation: pulse 1.2s ease-in-out infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
 .icon-btn {
   width: 40px; height: 40px; display: grid; place-items: center;
   border-radius: 12px; border: 1px solid var(--border); background: var(--surface);

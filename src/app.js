@@ -83,13 +83,16 @@ const Transport = {
       onMessage: handleMessage,
       onBinary: onBinaryFrame,
       onOpen: onPeerOpen,
-      onClose: onPeerClose
+      onClose: onPeerClose,
+      onLive: (live) => { renderNetPill(); if (live) onResume(); }
     });
     this.active.start();
   },
   send(msg) { if (this.active) this.active.send(msg); },
   notifyAll(msg) { if (this.active) this.active.notifyAll(msg); },
   sendRaw(peerId, buf) { return this.active ? this.active.sendRaw(peerId, buf) : false; },
+  isLive() { return this.active ? this.active.isLive() : false; },
+  resume() { if (this.active) this.active.resume(); },
   bufferedAmount(peerId) { return this.active ? this.active.bufferedAmount(peerId) : 0; },
   stop() { if (this.active) { this.active.stop(); this.active = null; } }
 };
@@ -159,6 +162,7 @@ function sendPing() {
 }
 function heartbeat() {
   if (!state.network) return;
+  renderNetPill();     // reflect the live socket state as it changes
   sendPing();
   const now = Date.now();
   if (now < graceUntil) return;      // just woke up — peers haven't had a chance to answer yet
@@ -175,6 +179,10 @@ function heartbeat() {
 function onResume() {
   if (!state.network) return;
   graceUntil = Date.now() + PRESENCE_TIMEOUT_MS;
+  // The socket is usually dead after the OS suspends the app; reconnect first,
+  // otherwise these announcements go into a closed connection.
+  Transport.resume();
+  renderNetPill();
   sendPing();
   Transport.send({ type: "hello", device: { id: state.device.id, name: state.device.name, type: state.device.type } });
 }
@@ -854,8 +862,20 @@ function renderAll() { renderNetPill(); renderDevices(); renderTargets(); render
 
 function renderNetPill() {
   const pill = $("#netPill"), label = $("#netLabel");
-  if (state.network) { pill.classList.add("online"); label.textContent = "Linked · " + state.network.code; $("#leaveBtn").style.display = "block"; }
-  else { pill.classList.remove("online"); label.textContent = "Not linked"; $("#leaveBtn").style.display = "none"; }
+  if (!state.network) {
+    pill.classList.remove("online", "reconnecting");
+    label.textContent = "Not linked";
+    $("#leaveBtn").style.display = "none";
+    return;
+  }
+  $("#leaveBtn").style.display = "block";
+  // Remembering a network is not the same as being connected to one. Saying
+  // "Linked" while the socket is down is how a suspended phone could look fine
+  // and still be invisible to every other device.
+  const live = Transport.isLive();
+  pill.classList.toggle("online", live);
+  pill.classList.toggle("reconnecting", !live);
+  label.textContent = live ? "Linked · " + state.network.code : "Reconnecting · " + state.network.code;
 }
 
 function renderDevices() {

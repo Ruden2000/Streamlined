@@ -36,7 +36,11 @@ jobs:
           body: |
             ## Streamlined ${{ github.ref_name }}
 
-            ### New in this release
+            ### Fixed in this release
+            - **Devices showing as Offline even though both apps were open.** If the connection to the pairing service ever dropped — a phone locking or backgrounding, switching Wi-Fi, or a brief network blip — the app never reconnected. It kept showing "Linked" while being completely invisible to your other devices, until you restarted it. It now reconnects automatically, and immediately when you reopen the app.
+            - **The status now tells the truth.** The badge reads **Reconnecting** whenever the connection is down, instead of claiming "Linked" when nothing can actually reach you.
+
+            ### Also new
             - **Live speed and time remaining** on every transfer, plus a combined progress bar when several are running at once.
             - **Trust a device** — mark one device as trusted on the Devices tab and its files arrive without a prompt, instead of switching auto-accept on for everyone.
             - **Search your history** by file name or device.

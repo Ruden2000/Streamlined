@@ -45,6 +45,8 @@ class BaseTransport {
   // Raw ArrayBuffer to one peer. File payloads take this path so they are not
   // inflated ~33% by base64 or copied through JSON.
   sendRaw() { return false; }
+  isLive() { return true; }   // local-only backends are always reachable
+  resume() {}
   // Default: a broadcast notify is just a normal broadcast (BroadcastChannel
   // backend). WebRTCTransport overrides this to also cross the signaling socket.
   notifyAll(msg) { this.send(msg); }
@@ -98,34 +100,89 @@ export class WebRTCTransport extends BaseTransport {
     this.peers = new Map();        // peerId -> { pc, dc, open, pending: [] }
     this.fallback = null;          // BroadcastTransport if signaling fails
     this._opened = false;
+    this._retries = 0;
+    this._reTimer = null;
+    this.onLive = opts.onLive || (() => {});   // (bool) signalling reachable?
   }
 
+  /* Is the signalling socket actually up right now? "Linked" in the UI used to
+     mean "we once connected", which is how a suspended phone could sit there
+     claiming to be linked while being absent from the room entirely. */
+  isLive() { return !!(this.ws && this.ws.readyState === 1); }
+
   start() {
+    this._stopped = false;
+    this._connectSignaling();
+  }
+
+  // NOTE: distinct from _connect(peerId, initiator) below, which builds a
+  // peer connection. These are different layers; do not merge the names.
+  _connectSignaling() {
+    if (this._stopped) return;
     // room rides in the URL so a Cloudflare Worker can route to the right
     // Durable Object before accepting the socket (the Node dev server ignores it)
     const sep = this.signalingUrl.includes("?") ? "&" : "?";
     const url = this.signalingUrl + sep + "room=" + encodeURIComponent(this.room);
     let ws;
     try { ws = new WebSocket(url); }
-    catch { return this._useFallback(); }
+    catch { return this._onDrop(); }
     this.ws = ws;
-    // If the socket never opens (no server reachable), degrade gracefully.
-    this._failTimer = setTimeout(() => { if (!this._opened) this._useFallback(); }, 3500);
+    // If the socket never opens (no server reachable), treat it as a drop.
+    clearTimeout(this._failTimer);
+    this._failTimer = setTimeout(() => { if (!this._opened) this._onDrop(); }, 3500);
     ws.onopen = () => {
-      this._opened = true; clearTimeout(this._failTimer);
+      this._opened = true;
+      this._retries = 0;
+      clearTimeout(this._failTimer);
       ws.send(JSON.stringify({ type: "join", room: this.room, id: this.selfId }));
+      // Signalling is back: the same-browser stand-in is no longer needed.
+      if (this.fallback) { try { this.fallback.stop(); } catch {} this.fallback = null; }
+      this.onLive(true);
     };
     ws.onmessage = (e) => { try { this._onSignal(JSON.parse(e.data)); } catch {} };
-    ws.onerror = () => { if (!this._opened) this._useFallback(); };
-    ws.onclose = () => { if (!this._opened) this._useFallback(); };
+    ws.onerror = () => this._onDrop();
+    ws.onclose = () => this._onDrop();
+  }
+
+  /* Any loss of the signalling socket — first-connect failure, a network
+     change, or the OS suspending the app — lands here. Previously a socket
+     that dropped AFTER connecting was simply ignored, so the device stayed
+     "linked" forever while silently absent from its room. */
+  _onDrop() {
+    if (this._stopped) return;
+    clearTimeout(this._failTimer);
+    const everOpened = this._opened;
+    this._opened = false;
+    if (this.ws) {
+      try { this.ws.onopen = this.ws.onmessage = this.ws.onerror = this.ws.onclose = null; this.ws.close(); } catch {}
+      this.ws = null;
+    }
+    this.onLive(false);
+    // Never reached the server at all: fall back to same-browser messaging so
+    // two tabs still work — but keep retrying the real socket underneath.
+    if (!everOpened && !this.fallback && this._retries >= 1) this._useFallback();
+    this._scheduleReconnect();
+  }
+
+  _scheduleReconnect() {
+    if (this._stopped || this._reTimer) return;
+    const step = Math.min(this._retries++, 5);
+    const delay = Math.min(1000 * Math.pow(2, step), 15000) + Math.floor(Math.random() * 400);
+    this._reTimer = setTimeout(() => { this._reTimer = null; this._connectSignaling(); }, delay);
+  }
+
+  /* Called when the app returns to the foreground or the network comes back:
+     don't sit through the backoff, retry immediately. */
+  resume() {
+    if (this._stopped || this.isLive()) return;
+    clearTimeout(this._reTimer); this._reTimer = null;
+    this._retries = 0;
+    this._connectSignaling();
   }
 
   _useFallback() {
     if (this.fallback || this._stopped) return;
-    clearTimeout(this._failTimer);
-    try { if (this.ws) this.ws.close(); } catch {}
-    this.ws = null;
-    console.warn("[transport] signaling unavailable — falling back to BroadcastChannel (same-browser only)");
+    console.warn("[transport] signaling unreachable — using BroadcastChannel (same-browser only) while retrying");
     this.fallback = new BroadcastTransport({ selfId: this.selfId, room: this.room, onMessage: this.onMessage, onBinary: this.onBinary, onOpen: this.onOpen, onClose: this.onClose });
     this.fallback.start();
   }
@@ -180,6 +237,10 @@ export class WebRTCTransport extends BaseTransport {
   async _handleSignal(from, data) {
     let peer = this.peers.get(from);
     if (data.sdp) {
+      // A new offer for a peer we already hold means their side restarted
+      // (app resumed, network changed). Replace the stale connection rather
+      // than applying the offer to a dead one.
+      if (data.sdp.type === "offer" && peer) { this._closePeer(from); peer = null; }
       if (!peer) peer = this._connect(from, false);
       await peer.pc.setRemoteDescription(data.sdp);
       // flush any ICE candidates that arrived before the remote description
@@ -246,6 +307,7 @@ export class WebRTCTransport extends BaseTransport {
   stop() {
     this._stopped = true;
     clearTimeout(this._failTimer);
+    clearTimeout(this._reTimer); this._reTimer = null;
     if (this.fallback) { this.fallback.stop(); this.fallback = null; }
     if (this.ws) { try { this.ws.close(); } catch {} this.ws = null; }
     for (const p of this.peers.values()) { try { p.pc.close(); } catch {} }
