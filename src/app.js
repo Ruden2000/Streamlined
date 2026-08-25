@@ -6,7 +6,7 @@
    signaling transport; the message protocol (hello/offer/chunk/complete)
    is designed to stay the same so the rest of this file is unaffected.
    ==================================================================== */
-import { $, $$, el, fmtBytes, fmtTime, uid, escapeHtml, linkify, isGenericName, numberedName, bytesToB64, b64ToBytes, blobToB64 } from "./util.js";
+import { $, $$, el, fmtBytes, fmtTime, fmtDuration, uid, escapeHtml, linkify, isGenericName, numberedName, bytesToB64, b64ToBytes, blobToB64 } from "./util.js";
 import { state, MAX_DEVICES, CHUNK } from "./state.js";
 import { QR } from "./qr.js";
 import { Crypto } from "./crypto.js";
@@ -391,7 +391,25 @@ function fileId(file) {
 }
 
 const OFFER_TIMEOUT_MS = 30000;
-const YIELD_EVERY = 8;          // repaint roughly every 256 KB of payload
+const YIELD_EVERY = 8;
+
+/* Smoothed throughput per transfer, sampled at most twice a second so a single
+   slow chunk doesn't make the readout jump around. */
+function noteProgress(rec, done) {
+  const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
+  if (!rec._spAt) { rec._spAt = now; rec._spBytes = done; return; }
+  const dt = now - rec._spAt;
+  if (dt < 500) return;
+  const inst = ((done - rec._spBytes) * 1000) / dt;
+  rec.speed = rec.speed ? rec.speed * 0.6 + inst * 0.4 : inst;
+  rec._spAt = now; rec._spBytes = done;
+}
+function rateText(t) {
+  if (!t.speed || t.speed <= 0) return "";
+  const left = Math.max(0, (t.size || 0) - (t.dir === "sent" ? (t.sent || 0) : Math.round(((t.progress || 0) / 100) * (t.size || 0))));
+  const eta = left / t.speed;
+  return fmtBytes(t.speed) + "/s" + (eta > 1 && isFinite(eta) ? " · " + fmtDuration(eta) + " left" : "");
+}          // repaint roughly every 256 KB of payload
 
 // Mark a send as failed but KEEP the file in memory so "Retry" can resend it.
 function failTransfer(tid, reason) {
@@ -446,6 +464,7 @@ async function streamFile(rec) {
       }
       offset += buf.length;
       rec.sent = offset; rec.progress = Math.round((offset / total) * 100);
+      noteProgress(rec, offset);
       queueProgress(rec.id);
       // Yield to the UI every few chunks instead of every one: browsers clamp
       // nested setTimeout(0) to ~4 ms, so per-chunk yielding was costing more
@@ -468,10 +487,18 @@ async function streamFile(rec) {
 /* ====================================================================
    RECEIVING
    ==================================================================== */
+function isTrusted(id) { return (state.settings.trusted || []).includes(id); }
+function setTrusted(id, on) {
+  const list = state.settings.trusted || [];
+  state.settings.trusted = on ? [...new Set([...list, id])] : list.filter((x) => x !== id);
+  saveSettings(); renderDevices();
+}
+
 async function onOffer(msg) {
   if (state.device.banned) return;
   const meta = { tid: msg.tid, fid: msg.fid || null, name: msg.name, size: msg.size, mime: msg.mime, from: msg._from };
-  if (state.settings.autoAccept) { acceptOffer(meta); return; }
+  // Global auto-accept, or this one device marked as trusted.
+  if (state.settings.autoAccept || isTrusted(msg._from)) { acceptOffer(meta); return; }
   state.pendingOffers.set(msg.tid, meta);
   // Only one prompt fits on screen. A second offer used to overwrite the first,
   // which then could never be accepted or declined - it just timed out on the
@@ -596,7 +623,11 @@ function ingestChunk(tid, off, bytes, total) {
   if (inc.ordered && inc.pendingBytes >= FLUSH_BYTES) flushPending(inc);
   armReceiveWatchdog(tid);   // progress means the sender is alive
   const rec = state.transfers.get(tid);
-  if (rec && total) { rec.progress = Math.round((inc.received / total) * 100); queueProgress(tid); }
+  if (rec && total) {
+    rec.progress = Math.round((inc.received / total) * 100);
+    noteProgress(rec, inc.received);
+    queueProgress(tid);
+  }
 }
 
 function failReceive(tid, e) {
@@ -835,12 +866,26 @@ function renderDevices() {
     .sort((a, b) => (b.me ? 1 : 0) - (a.me ? 1 : 0) || (b.online ? 1 : 0) - (a.online ? 1 : 0) || String(a.name).localeCompare(String(b.name)));
   for (const d of devs) {
     const off = !d.me && !d.online;
-    const row = el("div", "device" + (d.me ? " me" : "") + (d.banned ? " banned" : "") + (off ? " offline" : ""));
-    const status = d.banned ? "⛔ Quarantined" : d.me ? "This device" : d.online ? "Online" : "Offline · still linked";
+    const row = el("div", "device" + (d.me ? " me" : "") + (d.banned ? " banned" : "") + (off ? " offline" : "") + (!d.me && isTrusted(d.id) ? " trusted" : ""));
+    const trust = !d.me && isTrusted(d.id) ? " · trusted" : "";
+    const status = (d.banned ? "⛔ Quarantined" : d.me ? "This device" : d.online ? "Online" : "Offline · still linked") + trust;
     row.innerHTML =
       '<div class="dv-ic">' + (DEVICE_ICONS[d.type] || DEVICE_ICONS.desktop) + '</div>' +
       '<div class="dv-meta"><div class="dv-name">' + escapeHtml(d.name) + '</div>' +
       '<div class="dv-sub">' + status + " · " + d.type + '</div></div>';
+    // Trusting one device is safer than switching auto-accept on for everyone.
+    if (!d.me && !d.banned) {
+      const on = isTrusted(d.id);
+      const t = el("button", "btn ghost sm", on ? "Trusted" : "Trust");
+      t.title = on ? "Stop auto-accepting files from " + d.name : "Auto-accept files from " + d.name + " without a prompt";
+      t.setAttribute("aria-pressed", on ? "true" : "false");
+      t.onclick = () => {
+        setTrusted(d.id, !on);
+        toast("good", on ? "Trust removed" : "Device trusted",
+          on ? "Files from " + d.name + " will ask first again." : "Files from " + d.name + " arrive without a prompt.");
+      };
+      row.appendChild(t);
+    }
     // Permanent pairing needs an escape hatch: a device that's gone for good
     // would otherwise sit in the roster forever, consuming one of the 6 slots.
     if (off) {
@@ -889,8 +934,32 @@ function renderSelected() {
   });
 }
 
+/* One line summarising everything in flight — the useful view when a batch or
+   an "all devices" send is running. */
+function renderAggregate() {
+  const row = $("#aggRow");
+  if (!row) return;
+  const live = [...state.transfers.values()].filter((t) => t.status === "sending" || t.status === "receiving");
+  if (live.length < 2) { row.style.display = "none"; return; }
+  let total = 0, done = 0, speed = 0;
+  for (const t of live) {
+    total += t.size || 0;
+    done += t.dir === "sent" ? (t.sent || 0) : Math.round(((t.progress || 0) / 100) * (t.size || 0));
+    speed += t.speed || 0;
+  }
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const eta = speed > 0 ? (total - done) / speed : 0;
+  row.style.display = "flex";
+  row.innerHTML =
+    '<span>' + live.length + ' transfers</span>' +
+    '<span class="agg-bar"><i style="width:' + pct + '%"></i></span>' +
+    '<span class="t-rate">' + pct + '%' + (speed > 0 ? ' · ' + escapeHtml(fmtBytes(speed)) + '/s' : '') +
+    (eta > 1 && isFinite(eta) ? ' · ' + escapeHtml(fmtDuration(eta)) + ' left' : '') + '</span>';
+}
+
 function renderTransfers() {
   const list = $("#transfersList");
+  renderAggregate();
   if (!state.transfers.size && !state.outbox.length) { list.innerHTML = ""; list.appendChild(emptyState("list", "No active transfers", "Sent and received files will appear here while in flight.")); return; }
   list.innerHTML = "";
   for (const q of state.outbox) {
@@ -918,7 +987,7 @@ function renderTransfers() {
     node.innerHTML =
       '<div class="t-head">' + dirBadge + '<span class="t-name">' + escapeHtml(t.name) + '</span><span class="t-pct">' + (t.status === "blocked" ? "⛔" : bad ? "!" : t.progress + "%") + '</span></div>' +
       '<div class="bar"><i style="width:' + (t.status === "blocked" || bad ? 100 : t.progress) + '%;' + (t.status === "blocked" || bad ? "background:var(--danger)" : "") + '"></i></div>' +
-      '<div class="t-sub"><span>' + statusTxt + '</span><span>' + fmtBytes(t.size) + '</span></div>';
+      '<div class="t-sub"><span>' + statusTxt + '</span><span class="t-rate">' + escapeHtml(rateText(t)) + '</span><span>' + fmtBytes(t.size) + '</span></div>';
     // A stalled or failed send is recoverable: resend it, or clear it away.
     if (bad) {
       const acts = el("div", "t-actions");
@@ -968,7 +1037,10 @@ function flushProgress() {
       const bpct = box.querySelector(".dl-pct");
       if (bpct) bpct.textContent = t.progress + "%";
     }
+    const rateEl = row.querySelector(".t-rate");
+    if (rateEl) rateEl.textContent = rateText(t);
   }
+  renderAggregate();
   _dirtyTransfers.clear();
   if (needFull) renderTransfers();
 }
@@ -991,19 +1063,34 @@ function buildHistRow(h) {
 const DAY_MS = 24 * 3600 * 1000;
 const RECENT_MAX = 8;   // newest-first cap for the main-panel list
 
+let histQuery = "";
+function matchesQuery(h) {
+  if (!histQuery) return true;
+  const q = histQuery.toLowerCase();
+  return String(h.name || "").toLowerCase().includes(q) || String(h.peer || "").toLowerCase().includes(q);
+}
+
 function renderHistory() {
   $("#dlCountLabel").textContent = state.settings.downloadableCopies;
   const now = Date.now();
   const recent = state.history.filter((h) => now - h.ts < DAY_MS);
-  // History tab gets everything older than 24h, plus recent overflow past the cap
-  const older = state.history.filter((h) => now - h.ts >= DAY_MS).concat(recent.slice(RECENT_MAX));
+  // History tab gets everything older than 24h, plus recent overflow past the
+  // cap. Searching looks across the whole history, not just the older slice.
+  const older = (histQuery
+    ? state.history.filter(matchesQuery)
+    : state.history.filter((h) => now - h.ts >= DAY_MS).concat(recent.slice(RECENT_MAX)));
 
   const recentList = $("#recentList"); recentList.innerHTML = "";
   if (!recent.length) recentList.appendChild(el("div", "notice", "Nothing transferred in the past 24 hours."));
   else for (const h of recent.slice(0, RECENT_MAX)) recentList.appendChild(buildHistRow(h));
 
   const list = $("#historyList"); list.innerHTML = "";
-  if (!older.length) { list.appendChild(emptyState("clock", "No older history", "Transfers older than 24 hours move here from the main panel.")); return; }
+  if (!older.length) {
+    list.appendChild(histQuery
+      ? emptyState("clock", "No matches", 'Nothing in history matches "' + histQuery + '".')
+      : emptyState("clock", "No older history", "Transfers older than 24 hours move here from the main panel."));
+    return;
+  }
   for (const h of older) list.appendChild(buildHistRow(h));
 }
 
@@ -1033,6 +1120,7 @@ function renderSettings() {
   $("#soundToggle").checked = state.settings.sound;
   $("#notifToggle").checked = state.settings.notifications;
   $("#autoSaveToggle").checked = state.settings.autoSave;
+  $("#shrinkToggle").checked = state.settings.shrinkImages;
   $("#curVersion").textContent = "v" + APP_VERSION;
 }
 
@@ -1483,6 +1571,31 @@ async function filesFromDrop(dt) {
   return out.length ? out : [...dt.files];
 }
 
+/* Downscale oversized photos before sending. JPEG stays JPEG and PNG stays PNG
+   so transparency is never silently flattened, and the result is only used when
+   it is actually smaller. The file on disk is untouched. */
+const SHRINK_MIN_BYTES = 1024 * 1024;
+const SHRINK_MAX_EDGE = 2048;
+
+async function shrinkImage(file) {
+  const type = file.type === "image/png" ? "image/png" : "image/jpeg";
+  if (!/^image\/(jpeg|png)$/.test(file.type) || file.size < SHRINK_MIN_BYTES) return file;
+  if (typeof createImageBitmap === "undefined" || typeof OffscreenCanvas === "undefined") return file;
+  try {
+    const bmp = await createImageBitmap(file);
+    const scale = Math.min(1, SHRINK_MAX_EDGE / Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width * scale));
+    const h = Math.max(1, Math.round(bmp.height * scale));
+    const canvas = new OffscreenCanvas(w, h);
+    const ctx = canvas.getContext("2d");
+    ctx.drawImage(bmp, 0, 0, w, h);
+    bmp.close && bmp.close();
+    const blob = await canvas.convertToBlob({ type, quality: 0.82 });
+    if (!blob || blob.size >= file.size) return file;      // no win — keep the original
+    return new File([blob], file.name, { type, lastModified: file.lastModified });
+  } catch { return file; }
+}
+
 const RENAME_PROMPT_LIMIT = 5;   // never interrogate someone over a whole folder
 
 async function addFiles(fileList, opts) {
@@ -1491,7 +1604,12 @@ async function addFiles(fileList, opts) {
   // unusable, so bulk adds skip straight to auto-numbering.
   const askNames = !(opts && opts.noPrompt) && incoming.length <= RENAME_PROMPT_LIMIT;
   const taken = new Set(state.selected.map((f) => f.name));
+  let savedBytes = 0;
   for (let f of incoming) {
+    if (state.settings.shrinkImages) {
+      const small = await shrinkImage(f);
+      if (small !== f) { savedBytes += f.size - small.size; f = small; }
+    }
     // generic default name (image.jpg, IMG_1234, …) → offer an optional rename
     if (askNames && isGenericName(f.name)) {
       const newName = await promptRename(f);
@@ -1508,6 +1626,7 @@ async function addFiles(fileList, opts) {
     state.selected.push(f);
     renderSelected();
   }
+  if (savedBytes > 0) toast("good", "Photos shrunk", fmtBytes(savedBytes) + " less to send.");
   if (!state.network) toast("info", "Link a device first", "Create or enter a pairing code to choose a destination.");
 }
 
@@ -1665,6 +1784,7 @@ function init() {
   $("#dlRange").addEventListener("input", (e) => { state.settings.downloadableCopies = +e.target.value; $("#dlVal").textContent = e.target.value; saveSettings(); pruneHistory(); pruneCopies(); renderHistory(); });
   $("#scanToggle").addEventListener("change", (e) => { state.settings.scanning = e.target.checked; saveSettings(); if (!e.target.checked) toast("warn", "Scanning disabled", "Outgoing files will not be checked. Not recommended."); });
   $("#autoToggle").addEventListener("change", (e) => { state.settings.autoAccept = e.target.checked; saveSettings(); });
+  $("#shrinkToggle").addEventListener("change", (e) => { state.settings.shrinkImages = e.target.checked; saveSettings(); });
   $("#soundToggle").addEventListener("change", (e) => { state.settings.sound = e.target.checked; saveSettings(); });
   $("#autoSaveToggle").addEventListener("change", (e) => {
     state.settings.autoSave = e.target.checked; saveSettings();
@@ -1680,6 +1800,7 @@ function init() {
       unsubscribePush();
     }
   });
+  $("#histSearch").addEventListener("input", (e) => { histQuery = e.target.value.trim(); renderHistory(); });
   $("#clearHistBtn").addEventListener("click", () => {
     state.history = [];
     if (Store.available()) Store.clear().catch(() => {});   // drop stored copies too
@@ -1739,6 +1860,14 @@ function init() {
   // fresh — rejoin the network the background helper is still holding.
   // Everywhere: fall back to the last-used pairing code so a relaunched app
   // (including an autostart boot) re-links without user action.
+  // Arrived from the OS share sheet: collect what the service worker stashed.
+  try {
+    if (new URLSearchParams(location.search).get("shared")) {
+      history.replaceState({}, "", location.pathname);
+      consumeShared();
+    }
+  } catch { /* ignore */ }
+
   // Scanned or shared link: ?join=CODE joins straight away.
   let joinParam = null;
   try {
@@ -1800,6 +1929,38 @@ function showCode(code) {
   try { QR.render($("#qrCanvas"), SITE_URL + "/?join=" + code, { scale: 5, dark: "#0f1729", light: "#ffffff" }); }
   catch (e) { console.warn("QR render failed", e); }
 }
+/* Pull files/text handed over by the share sheet (stashed by the service
+   worker, since a redirect cannot carry a POST body). */
+async function consumeShared() {
+  if (typeof caches === "undefined") return;
+  try {
+    const cache = await caches.open("sl-share");
+    const keys = await cache.keys();
+    if (!keys.length) return;
+    const files = [];
+    let shared = null;
+    for (const req of keys) {
+      const res = await cache.match(req);
+      if (!res) continue;
+      if (req.url.endsWith("/__shared/text")) { shared = await res.json().catch(() => null); continue; }
+      const name = decodeURIComponent(res.headers.get("x-share-name") || "shared-file");
+      const blob = await res.blob();
+      files.push(new File([blob], name, { type: blob.type || "application/octet-stream" }));
+    }
+    for (const req of keys) await cache.delete(req);
+    if (files.length) {
+      await addFiles(files, { noPrompt: files.length > 1 });
+      toast("good", "Shared to Streamlined", files.length + " file" + (files.length > 1 ? "s" : "") + " ready to send.");
+    }
+    if (shared && (shared.text || shared.url || shared.title)) {
+      const text = [shared.title, shared.text, shared.url].filter(Boolean).join("\n");
+      $("#clipInput").value = text;
+      setClipLocal(text);
+      toast("good", "Shared text added", "It is on your synced clipboard.");
+    }
+  } catch (e) { console.warn("shared payload unavailable", e); }
+}
+
 /* ---- QR scanning (in-app) ----
    Uses the platform BarcodeDetector where it exists (Chromium desktop +
    Android). Elsewhere the button stays hidden — those users can point their

@@ -14,14 +14,48 @@ self.addEventListener("activate", (e) =>
       // filenames, so keeping old caches only risks serving a page that points
       // at stylesheets/scripts which no longer exist.
       const keys = await caches.keys();
-      await Promise.all(keys.filter((k) => k !== CACHE && k !== META).map((k) => caches.delete(k)));
+      await Promise.all(keys.filter((k) => k !== CACHE && k !== META && k !== SHARE).map((k) => caches.delete(k)));
       await self.clients.claim();
     })()
   )
 );
 
-/* ---- offline shell (network-first) ---- */
+/* ---- Web Share Target ----
+   Android/Chrome deliver a share as a POST to this scope. Files can't survive a
+   redirect, so they are stashed in a cache and the app collects them on load. */
+const SHARE = "sl-share";
+
 self.addEventListener("fetch", (e) => {
+  const url = new URL(e.request.url);
+  if (e.request.method === "POST" && url.pathname.endsWith("/share-target")) {
+    e.respondWith((async () => {
+      try {
+        const form = await e.request.formData();
+        const cache = await caches.open(SHARE);
+        for (const k of await cache.keys()) await cache.delete(k);   // drop any previous share
+        const files = form.getAll("files").filter((f) => f && typeof f.size === "number");
+        let i = 0;
+        for (const f of files) {
+          await cache.put(
+            "/__shared/" + (i++),
+            new Response(f, {
+              headers: {
+                "content-type": f.type || "application/octet-stream",
+                "x-share-name": encodeURIComponent(f.name || "shared-file")
+              }
+            })
+          );
+        }
+        const text = form.get("text") || "", title = form.get("title") || "", link = form.get("url") || "";
+        if (text || link || title) {
+          await cache.put("/__shared/text", new Response(JSON.stringify({ text, title, url: link })));
+        }
+      } catch { /* fall through to the app either way */ }
+      return Response.redirect("./?shared=1", 303);
+    })());
+    return;
+  }
+
   const req = e.request;
   if (req.method !== "GET" || !req.url.startsWith("http")) return;
   e.respondWith(

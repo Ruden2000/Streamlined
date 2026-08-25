@@ -8,6 +8,15 @@ export const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 export const el = (tag, cls, html) => { const n = document.createElement(tag); if (cls) n.className = cls; if (html != null) n.innerHTML = html; return n; };
 export const fmtBytes = (b) => { if (b < 1024) return b + " B"; const u = ["KB","MB","GB","TB"]; let i = -1; do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1); return b.toFixed(b < 10 ? 1 : 0) + " " + u[i]; };
 export const fmtTime = (t) => { const d = new Date(t), now = Date.now(); const diff = (now - t) / 1000; if (diff < 60) return "just now"; if (diff < 3600) return Math.floor(diff/60) + "m ago"; if (diff < 86400) return Math.floor(diff/3600) + "h ago"; return d.toLocaleDateString(); };
+/* "1m 20s" / "45s" — compact enough to sit inside a transfer row. */
+export const fmtDuration = (secs) => {
+  if (!isFinite(secs) || secs < 0) return "";
+  const s = Math.round(secs);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + "m " + (s % 60) + "s";
+  return Math.floor(m / 60) + "h " + (m % 60) + "m";
+};
 export const uid = () => (crypto.randomUUID ? crypto.randomUUID() : "id-" + Math.random().toString(36).slice(2) + Date.now().toString(36));
 export function escapeHtml(s) { return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
 

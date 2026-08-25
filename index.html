@@ -71,6 +71,7 @@
       <section class="card">
         <h2>Transfers</h2>
         <div class="t-section-label">Active</div>
+        <div id="aggRow" class="agg-row" style="display:none"></div>
         <div id="transfersList">
           <div class="empty">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 12h16M4 6h16M4 18h10"/></svg>
@@ -122,6 +123,7 @@
             <h2 style="margin:0">Transfer history</h2>
             <button class="btn ghost sm" id="clearHistBtn">Clear</button>
           </div>
+          <input id="histSearch" class="hist-search" type="search" placeholder="Search by file or device…" aria-label="Search transfer history" />
           <div id="historyList"></div>
           <p class="notice">History is stored locally and <strong>encrypted at rest</strong>. Re-download is available for the <strong id="dlCountLabel">3</strong> most recent received files only.</p>
         </div>
@@ -158,8 +160,15 @@
           </div>
           <div class="setting">
             <div class="s-meta">
+              <div class="s-label">Shrink large photos</div>
+              <div class="s-desc">Resize big images before sending — much faster, and the original stays untouched on this device</div>
+            </div>
+            <label class="switch"><input type="checkbox" id="shrinkToggle" /><span class="slider"></span></label>
+          </div>
+          <div class="setting">
+            <div class="s-meta">
               <div class="s-label">Auto-accept incoming</div>
-              <div class="s-desc">Receive files without a prompt from devices in your network</div>
+              <div class="s-desc">Receive files without a prompt from <strong>every</strong> device. To trust just one device, use Trust on the Devices tab.</div>
             </div>
             <label class="switch"><input type="checkbox" id="autoToggle" /><span class="slider"></span></label>
           </div>
