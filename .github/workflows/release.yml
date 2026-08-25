@@ -37,53 +37,22 @@ jobs:
             ## Streamlined ${{ github.ref_name }}
 
             ### Fixed in this release
-            - **"That file's stored copy is no longer available" after receiving several files at once.** When a batch arrived, saving one file's copy could wipe out another's before it had finished being recorded — so rows offered a View/Download that could not work, and most rows lost their buttons entirely. Copies are now saved one at a time and a file being written is never cleaned up.
+            - **"That file's stored copy is no longer available" after receiving several files at once.** When a batch arrived, saving one file's copy could wipe out another's before it had finished being recorded — so rows offered a View/Download that couldn't work, and most rows lost their buttons entirely.
 
             ### New in this release
-            - **Download all** — one button saves every file in the list, instead of clicking through them one at a time.
-            - **Choose where files are saved (desktop)** — Settings → *Save files to* lets you pick any folder on your PC, and received files are written straight there. Existing files are never overwritten; a duplicate becomes "name (2).jpg".
+            - **Download all** — one button saves every file in the list.
+            - **Choose where files are saved (desktop)** — Settings → *Save files to* lets you pick any folder on your PC; received files are written straight there. Nothing is ever overwritten — a duplicate becomes "name (2).jpg".
 
-            ### Previously fixed
-            - **Devices showing as Offline even though both apps were open.** If the connection to the pairing service ever dropped — a phone locking or backgrounding, switching Wi-Fi, or a brief network blip — the app never reconnected. It kept showing "Linked" while being completely invisible to your other devices, until you restarted it. It now reconnects automatically, and immediately when you reopen the app.
-            - **The status now tells the truth.** The badge reads **Reconnecting** whenever the connection is down, instead of claiming "Linked" when nothing can actually reach you.
-
-            ### Also new
-            - **Live speed and time remaining** on every transfer, plus a combined progress bar when several are running at once.
-            - **Trust a device** — mark one device as trusted on the Devices tab and its files arrive without a prompt, instead of switching auto-accept on for everyone.
-            - **Search your history** by file name or device.
-            - **Shrink large photos** (optional) — big images are resized before sending, so they go much faster. The originals on your device are untouched, and PNG transparency is preserved.
-            - **Share straight into Streamlined** — on Android, Streamlined now appears in the system share sheet, so you can send a photo or link from any app without opening Streamlined first.
-
-            ### Previously
-            - **Much faster transfers** — file data now travels as raw binary instead of being text-encoded, removing about a third of the bytes on the wire and a lot of processing on both ends. Devices on older versions still work; they just use the old path.
-            - **Big files no longer eat your memory** — incoming files are written into disk-backed storage as they arrive instead of being held whole in RAM, so large videos no longer risk taking the app down.
-            - **Interrupted transfers resume** — if a transfer drops, retrying continues from where it stopped instead of starting over.
-            - **Stored copies actually work now** — re-downloadable copies moved from a ~5 MB browser limit to proper local storage (gigabytes), so the "keep the most recent N files" setting does what it says. Copies are still encrypted.
-            - **Paste to send** — copy a screenshot or a file anywhere, press <kbd>Ctrl</kbd>+<kbd>V</kbd> in Streamlined, and it's queued to send. No file dialog.
-            - **Send a whole folder** — drop a folder in (or use *Send a folder*); every file comes across with its folder path kept in the name.
-            - **Auto-save received files** — turn it on in Settings and incoming files go straight to your Downloads folder.
-            - **Scannable pairing QR** — the code now opens the app directly. Point your phone's normal camera at it and you're linked; no typing. (Android/desktop Chrome also get an in-app *Scan QR code* button.)
-
-            ### Fixed in this release
-            - **Faster transfers** — files now move in larger blocks with far less per-block overhead, which cuts a big chunk of time off large transfers.
-            - **Receiving no longer gets stuck** — if a sender disappears mid-transfer, the receiving side now gives up cleanly instead of sitting at a partial percentage forever holding the data in memory.
-            - **Two files at once no longer lose one** — a second incoming file used to replace the first prompt, leaving the first stranded. Offers now queue up one after another.
-            - **Less notification noise** — the device actually receiving a file no longer gets a duplicate alert on top of its own transfer prompt.
-            - **Destination list could go blank** — picking a device that then went offline could leave the send box empty.
-            - **App looked broken/unstyled after updating** — the desktop app was running the website's offline cache, which pointed at stylesheets from the previous version. That cache no longer runs in the installed app, and any leftover copy is cleared automatically on first launch. Updates now apply cleanly every time.
-            - **Devices wrongly showing Offline** — the desktop's background helper was joining your network under the same identity as the app window, so the server misrouted the connection handshake and devices could never fully link up. Helpers are now separate, and phones no longer drop offline just because the app was backgrounded.
-            - **Transfers stuck on "sending"** — files sent to a device that isn't reachable now time out with a clear reason and **Retry / Dismiss** buttons instead of hanging forever. Queued files can no longer be sent into a void.
-            - **Multiple app icons in the system tray** — opening Streamlined while it was already running started a second copy each time. It now restores the running one.
-            - **Forget a device** — remove a device that's gone for good from your network (frees one of the 6 slots).
-
-            ### Recently added
-            - **Download notifications** — incoming files show a small dismissible progress box with the filename.
-            - **Clearer Transfers panel** — Active transfers up top, files from the last 24 hours below; older items live in the History tab.
-            - **Send while offline** — queue files with no device online; they send automatically when one reconnects.
-            - **Smarter file names** — optional rename prompt for generic names (image.jpg, IMG_1234…), and duplicates auto-number (image1.jpg, image2.jpg).
-            - **Preview before download** — a View button shows images, video, audio, PDFs, and text in-app.
-            - **Up to 20 downloadable copies** (size permitting) — raised from 3.
-            - **Roll Back picker** — choose any earlier version from a list.
+            ### Recent highlights
+            - **Devices stay connected.** A dropped connection (phone locking, Wi-Fi change, network blip) used to leave a device silently invisible to the others while still showing "Linked". It now reconnects automatically, and the badge reads **Reconnecting** whenever the connection is actually down.
+            - **Live speed and time remaining**, plus a combined bar when several transfers run at once.
+            - **Trust a device** so its files arrive without a prompt — safer than turning auto-accept on for everyone.
+            - **Paste to send** (Ctrl+V), **send a whole folder**, and **shrink large photos** before sending.
+            - **Scan the pairing QR with your phone's normal camera** to link instantly.
+            - **Share into Streamlined** from any Android app's share sheet.
+            - **Search your history**, **preview files before downloading**, and **resume interrupted transfers**.
+            - **Much faster transfers** and **large files no longer eat memory**.
+            - Devices stay linked permanently (shown Offline when away) until you Leave or Forget them.
 
             ### About background running (Windows)
             Closing Streamlined to the system tray **shuts down the main window to free its memory**. A tiny background helper keeps a single connection open purely so it can show you a **native notification with the filename** when a paired device sends a file — it never sees file contents (transfers stay peer-to-peer and encrypted). Click the notification (or the tray icon) to reopen the app. To stop it entirely, right-click the tray icon → **Quit**.
