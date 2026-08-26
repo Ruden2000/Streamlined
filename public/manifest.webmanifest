@@ -1,7 +1,14 @@
 {
-  "name": "Streamlined \u2014 File Transfer",
+  "id": "/",
+  "name": "Streamlined — File Transfer",
   "short_name": "Streamlined",
   "description": "Fast, private, end-to-end-encrypted file transfer between your devices.",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": [
+    "utilities",
+    "productivity"
+  ],
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

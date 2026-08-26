@@ -89,7 +89,8 @@
     <ul>
       <li><strong>No account required.</strong> We never ask for your name, email, or any identifying information.</li>
       <li><strong>No file content.</strong> Files are transferred peer-to-peer over an encrypted WebRTC connection. File bytes are never transmitted to or stored on our servers.</li>
-      <li><strong>Ephemeral signaling data.</strong> To connect two devices, our signaling server briefly holds a randomly generated room ID and anonymous device ID (not linked to you). These are discarded as soon as the connection is established, typically within seconds.</li>
+      <li><strong>Ephemeral signaling data.</strong> To connect two devices, our signaling server briefly holds a randomly generated room ID and an anonymous device ID (not linked to you). These are discarded as soon as the connection is established, typically within seconds.</li>
+      <li><strong>A pending notification's file name.</strong> So a closed device can tell you <em>which</em> file arrived, the name of that file and the sending device's name are held very briefly on the server. They are deleted the moment the receiving device collects them, and discarded if unclaimed after five minutes. This is the only content-derived text that ever reaches our servers &mdash; the file itself never does.</li>
       <li><strong>Local-only history.</strong> Transfer history is stored on your device only, using your browser's local storage. We cannot access it.</li>
     </ul>
 

@@ -14,6 +14,9 @@ import { buildVapidJwt, vapidAuthHeader, audienceFor } from "./vapid.js";
 import { getFcmAccessToken, sendFcm } from "./fcm.js";
 
 const MAX_ROOM = 6;
+// How long a pending notification's file name may sit on the server before it
+// is treated as stale. Kept short so the server retains as little as possible.
+const NOTIFY_TTL_MS = 5 * 60 * 1000;
 const CORS = { "access-control-allow-origin": "*", "access-control-allow-methods": "GET,POST,OPTIONS", "access-control-allow-headers": "content-type" };
 function json(obj, extra) { return new Response(JSON.stringify(obj), { headers: { "content-type": "application/json", ...CORS, ...(extra || {}) } }); }
 
@@ -59,9 +62,16 @@ export class SignalingRoom {
       return json({ ok: true });
     }
 
-    // The service worker fetches the last file name to show in its notification.
+    // The service worker fetches the file name to put in its notification.
+    //
+    // This is the ONLY user-visible text the server ever holds, and it is
+    // deliberately short-lived: it is handed over once and deleted, and it is
+    // ignored entirely if nothing collected it within NOTIFY_TTL_MS. File
+    // contents never reach here at all.
     if (url.pathname === "/last-notify" && request.method === "GET") {
-      const last = (await this.state.storage.get("lastNotify")) || {};
+      const last = await this.state.storage.get("lastNotify");
+      await this.state.storage.delete("lastNotify");           // one-shot
+      if (!last || Date.now() - (last.ts || 0) > NOTIFY_TTL_MS) return json({});
       return json(last);
     }
 

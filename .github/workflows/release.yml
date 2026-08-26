@@ -36,7 +36,10 @@ jobs:
           body: |
             ## Streamlined ${{ github.ref_name }}
 
-            ### New in this release
+            ### Privacy improvement in this release
+            - **Pending notification file names are no longer kept.** So a closed device can tell you *which* file arrived, the file's name was briefly held by the pairing service — but it was never cleaned up. It is now handed over once and deleted immediately, and discarded entirely if unclaimed after five minutes. File contents have never reached the server and still don't.
+
+            ### Previously new
             - **Sent folders keep their structure.** When you send a folder and have a save folder chosen, the subfolders are recreated on the receiving PC instead of every file being dumped flat into one directory.
             - **Open and Show** — files saved to your folder get buttons to open them, or reveal them in File Explorer.
 
@@ -74,7 +77,7 @@ jobs:
             **iPhone / iPad / Mac** — open **https://streamlined-3bu.pages.dev** in Safari → **Share → Add to Home Screen**.
 
             ---
-            🔒 Files are transferred peer-to-peer with AES-256-GCM encryption. Nothing touches our servers. No account needed.
+            🔒 Files are transferred peer-to-peer with AES-256-GCM encryption — the files themselves never reach our servers. No account needed.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
