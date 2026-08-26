@@ -734,12 +734,15 @@ async function onComplete(msg) {
   finishDownloadBox(msg.tid, "done");
   // The file arrived intact; only the re-downloadable COPY is optional, so a
   // read failure must not sink the whole delivery.
-  // A nominated folder means "always put files there"; otherwise honour the
-  // auto-save switch and use the normal download path.
-  if (state.settings.saveFolder && folderSaveAvailable()) deliverFile(blob, msg.name);
-  else if (state.settings.autoSave) saveBlobToDisk(blob, msg.name);
   const entry = addHistory({ name: msg.name, size: msg.size, type: msg.mime, dir: "received", peer: rec.peer, status: "received", scan: "clean" });
   saveCopy(entry.id, blob);   // encrypted, in IndexedDB, capped by the setting
+  // A nominated folder means "always put files there"; otherwise honour the
+  // auto-save switch and use the normal download path.
+  if (state.settings.saveFolder && folderSaveAvailable()) {
+    saveToFolder(blob, msg.name).then((path) => {
+      if (path) { entry.savedPath = path; saveHistory(); renderHistory(); }
+    });
+  } else if (state.settings.autoSave) saveBlobToDisk(blob, msg.name);
   state.incoming.delete(msg.tid);
   chime();
   toast("good", "File received", msg.name);
@@ -909,22 +912,33 @@ const FOLDER_SAVE_MAX = 256 * 1024 * 1024;
 
 function folderSaveAvailable() { return detectShell() === "tauri"; }
 
+/* Returns the full path it was written to, or null if it wasn't. */
 async function saveToFolder(blob, name) {
   const dir = state.settings.saveFolder;
-  if (!dir || !folderSaveAvailable()) return false;
-  if (blob.size > FOLDER_SAVE_MAX) return false;
+  if (!dir || !folderSaveAvailable()) return null;
+  if (blob.size > FOLDER_SAVE_MAX) return null;
   try {
     const b64 = bytesToB64(new Uint8Array(await blob.arrayBuffer()));
-    await tauriInvoke("save_into_folder", { dir, name, b64 });
-    return true;
-  } catch (e) { console.warn("folder save failed", e); return false; }
+    const path = await tauriInvoke("save_into_folder", { dir, name, b64 });
+    return path || null;
+  } catch (e) { console.warn("folder save failed", e); return null; }
 }
 
 /* Put a received file wherever the user asked for it. */
 async function deliverFile(blob, name) {
-  if (await saveToFolder(blob, name)) return "folder";
+  const path = await saveToFolder(blob, name);
+  if (path) return { where: "folder", path };
   saveBlobToDisk(blob, name);
-  return "download";
+  return { where: "download", path: null };
+}
+
+function openSaved(path) {
+  tauriInvoke("open_saved_file", { path }).catch((e) =>
+    toast("warn", "Couldn't open it", String(e).replace(/^Error:\s*/, "")));
+}
+function revealSaved(path) {
+  tauriInvoke("reveal_saved_file", { path }).catch((e) =>
+    toast("warn", "Couldn't show it", String(e).replace(/^Error:\s*/, "")));
 }
 
 async function chooseSaveFolder() {
@@ -961,8 +975,11 @@ async function downloadHistory(id) {
   if (!h || !hasCopy(h)) return;
   const blob = await loadCopy(h);
   if (!blob) { toast("warn", "Copy unavailable", "That file's stored copy is no longer available."); return; }
-  const where = await deliverFile(blob, h.name);
-  if (where === "folder") toast("good", "Saved", h.name + " → " + state.settings.saveFolder);
+  const res = await deliverFile(blob, h.name);
+  if (res.where === "folder") {
+    h.savedPath = res.path; saveHistory(); renderHistory();
+    toast("good", "Saved", h.name + " → " + state.settings.saveFolder);
+  }
 }
 
 /* ====================================================================
@@ -1197,6 +1214,13 @@ function buildHistRow(h) {
     '<div class="file-ic">' + escapeHtml(fileExt(h.name)) + '</div>' +
     '<div class="hist-meta"><div class="hist-name">' + escapeHtml(h.name) + '</div>' +
     '<div class="hist-sub">' + dir + scan + '<span>' + fmtBytes(h.size) + '</span><span>·</span><span>' + (h.dir === "sent" ? "to " : "from ") + escapeHtml(h.peer) + '</span><span>·</span><span>' + fmtTime(h.ts) + '</span></div></div>';
+  // Already on disk: offer to open it or show it where it landed.
+  if (h.savedPath && folderSaveAvailable()) {
+    const o = el("button", "btn ghost sm", "Open"); o.title = h.savedPath;
+    o.onclick = () => openSaved(h.savedPath); row.appendChild(o);
+    const sh = el("button", "btn ghost sm", "Show"); sh.title = "Show in folder";
+    sh.onclick = () => revealSaved(h.savedPath); row.appendChild(sh);
+  }
   if (hasCopy(h)) {
     const v = el("button", "btn ghost sm", "View"); v.onclick = () => previewHistory(h.id); row.appendChild(v);
     const b = el("button", "btn ghost sm", "Download"); b.onclick = () => downloadHistory(h.id); row.appendChild(b);

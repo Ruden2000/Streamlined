@@ -37,6 +37,9 @@ jobs:
       - name: Compile Tauri shell
         working-directory: src-tauri
         run: cargo build
+      - name: Rust unit tests (path-safety guards)
+        working-directory: src-tauri
+        run: cargo test
 
   # Compile the Android APK (unsigned debug) so the Capacitor project + plugins
   # are validated on every push without needing the signing secrets.

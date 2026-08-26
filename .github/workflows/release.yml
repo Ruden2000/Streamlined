@@ -36,7 +36,11 @@ jobs:
           body: |
             ## Streamlined ${{ github.ref_name }}
 
-            ### Stronger encryption in this release
+            ### New in this release
+            - **Sent folders keep their structure.** When you send a folder and have a save folder chosen, the subfolders are recreated on the receiving PC instead of every file being dumped flat into one directory.
+            - **Open and Show** — files saved to your folder get buttons to open them, or reveal them in File Explorer.
+
+            ### Stronger encryption in the previous release
             - **Your files are now protected by a fresh key every session.** Previously the 6-character pairing code *was* the encryption key — so anyone who ever learned your code could, in principle, read traffic they had recorded earlier. Devices now perform a key exchange when they connect, and the resulting key never leaves the two devices. Recorded traffic from an earlier session can no longer be unlocked, even by someone who later learns your code.
             - **A verification number.** Each connected device shows six digits (e.g. 🔒 324940). If the same number appears on both devices, the connection is genuinely direct. Different numbers would mean something is relaying it.
             - Devices still running an older version keep working normally — they simply don't show the verification number.

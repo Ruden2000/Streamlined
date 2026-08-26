@@ -196,31 +196,42 @@ fn save_into_folder(dir: String, name: String, b64: String) -> Result<String, St
     use base64::{engine::general_purpose::STANDARD, Engine};
     use std::path::{Path, PathBuf};
 
-    // File names arrive from another device, so strip any directory portion —
-    // a name like "../../evil" must never escape the chosen folder.
-    let base = Path::new(&name)
-        .file_name()
-        .ok_or_else(|| "invalid file name".to_string())?
-        .to_owned();
-
     let dir_path = PathBuf::from(&dir);
     if !dir_path.is_dir() {
         return Err("save folder is not available".into());
     }
 
+    let rel = safe_relative_path(&name)?;
+    let mut target = dir_path.join(&rel);
+
+    // Belt and braces: whatever the segments were, the result must still sit
+    // inside the chosen folder once the OS has normalised it.
+    let canon_dir = dir_path.canonicalize().map_err(|e| e.to_string())?;
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        let canon_parent = parent.canonicalize().map_err(|e| e.to_string())?;
+        if !canon_parent.starts_with(&canon_dir) {
+            return Err("unsafe file path".into());
+        }
+    }
+
     // Never overwrite: fall back to "name (2).ext", "name (3).ext", ...
-    let mut target = dir_path.join(&base);
     if target.exists() {
-        let stem = Path::new(&base)
+        let file_name = target
+            .file_name()
+            .map(|s| s.to_owned())
+            .ok_or_else(|| "invalid file name".to_string())?;
+        let parent = target.parent().map(|p| p.to_path_buf()).unwrap_or(dir_path.clone());
+        let stem = Path::new(&file_name)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "file".into());
-        let ext = Path::new(&base)
+        let ext = Path::new(&file_name)
             .extension()
             .map(|s| format!(".{}", s.to_string_lossy()))
             .unwrap_or_default();
         for n in 2..10_000 {
-            let cand = dir_path.join(format!("{} ({}){}", stem, n, ext));
+            let cand = parent.join(format!("{} ({}){}", stem, n, ext));
             if !cand.exists() {
                 target = cand;
                 break;
@@ -231,6 +242,127 @@ fn save_into_folder(dir: String, name: String, b64: String) -> Result<String, St
     let bytes = STANDARD.decode(b64.as_bytes()).map_err(|e| e.to_string())?;
     std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
     Ok(target.to_string_lossy().to_string())
+}
+
+/// Turn a peer-supplied file name into a relative path that cannot escape the
+/// destination folder. A sent folder keeps its structure in the name
+/// ("trip/day1/a.jpg") and we want that recreated — but the name arrives from
+/// another device, so every segment is checked.
+fn safe_relative_path(name: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::PathBuf;
+    let mut rel = PathBuf::new();
+    let segments: Vec<&str> = name.split(['/', '\']).filter(|p| !p.is_empty()).collect();
+    if segments.is_empty() {
+        return Err("invalid file name".into());
+    }
+    for seg in &segments {
+        let t = seg.trim();
+        // "." and ".." climb or stall; a colon smuggles in a drive letter or an
+        // NTFS alternate data stream; control characters have no business here.
+        if t.is_empty()
+            || t == "."
+            || t == ".."
+            || t.contains(':')
+            || t.chars().any(|c| c.is_control())
+        {
+            return Err("unsafe file name".into());
+        }
+        rel.push(t);
+    }
+    Ok(rel)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::safe_relative_path;
+    use std::path::Path;
+
+    #[test]
+    fn keeps_a_sent_folders_structure() {
+        let p = safe_relative_path("trip/day1/a.jpg").unwrap();
+        assert_eq!(p, Path::new("trip").join("day1").join("a.jpg"));
+    }
+
+    #[test]
+    fn plain_names_pass_through() {
+        assert_eq!(safe_relative_path("photo.png").unwrap(), Path::new("photo.png"));
+    }
+
+    #[test]
+    fn rejects_traversal() {
+        for bad in ["../evil.exe", "a/../../evil", "..", "./../x", "a/./../../b"] {
+            assert!(safe_relative_path(bad).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_drive_qualified_paths() {
+        for bad in ["C:/Windows/System32/x.dll", "C:evil", "a/b:stream"] {
+            assert!(safe_relative_path(bad).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn rejects_backslash_traversal() {
+        assert!(safe_relative_path("..\..\evil").is_err());
+        assert!(safe_relative_path("a\..\..\b").is_err());
+    }
+
+    #[test]
+    fn rejects_empty_and_control_characters() {
+        assert!(safe_relative_path("").is_err());
+        assert!(safe_relative_path("///").is_err());
+        assert!(safe_relative_path("bad\u{0}name").is_err());
+    }
+
+    #[test]
+    fn a_leading_slash_stays_relative() {
+        // "/a/b.txt" must land at a/b.txt INSIDE the chosen folder, not at the
+        // filesystem root.
+        assert_eq!(safe_relative_path("/a/b.txt").unwrap(), Path::new("a").join("b.txt"));
+    }
+}
+
+/// Open a saved file with whatever application handles it.
+#[tauri::command]
+fn open_saved_file(path: String) -> Result<(), String> {
+    use std::path::Path;
+    let p = Path::new(&path);
+    if !p.is_file() {
+        return Err("that file is no longer there".into());
+    }
+    // explorer.exe receives the path as a single argument, so there is no shell
+    // to reinterpret anything inside it.
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(p)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("unsupported".into())
+}
+
+/// Reveal a saved file in the file manager, selected.
+#[tauri::command]
+fn reveal_saved_file(path: String) -> Result<(), String> {
+    use std::path::Path;
+    let p = Path::new(&path);
+    if !p.exists() {
+        return Err("that file is no longer there".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", p.display()))
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("unsupported".into())
 }
 
 // ---- startup launch (autostart) ----------------------------------------------
@@ -332,6 +464,8 @@ pub fn run() {
             set_autostart,
             pick_folder,
             save_into_folder,
+            open_saved_file,
+            reveal_saved_file,
             launch_hidden,
             retire_to_tray
         ])
