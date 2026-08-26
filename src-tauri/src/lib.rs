@@ -251,7 +251,7 @@ fn save_into_folder(dir: String, name: String, b64: String) -> Result<String, St
 fn safe_relative_path(name: &str) -> Result<std::path::PathBuf, String> {
     use std::path::PathBuf;
     let mut rel = PathBuf::new();
-    let segments: Vec<&str> = name.split(['/', '\']).filter(|p| !p.is_empty()).collect();
+    let segments: Vec<&str> = name.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
     if segments.is_empty() {
         return Err("invalid file name".into());
     }
@@ -304,8 +304,8 @@ mod tests {
 
     #[test]
     fn rejects_backslash_traversal() {
-        assert!(safe_relative_path("..\..\evil").is_err());
-        assert!(safe_relative_path("a\..\..\b").is_err());
+        assert!(safe_relative_path("..\\..\\evil").is_err());
+        assert!(safe_relative_path("a\\..\\..\\b").is_err());
     }
 
     #[test]
@@ -341,8 +341,13 @@ fn open_saved_file(path: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
+    // Attributes can't sit on a bare expression, so the fallback needs a block
+    // (same shape as open_external above).
     #[cfg(not(target_os = "windows"))]
-    Err("unsupported".into())
+    {
+        let _ = p;
+        Err("unsupported".into())
+    }
 }
 
 /// Reveal a saved file in the file manager, selected.
@@ -361,8 +366,13 @@ fn reveal_saved_file(path: String) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         return Ok(());
     }
+    // Attributes can't sit on a bare expression, so the fallback needs a block
+    // (same shape as open_external above).
     #[cfg(not(target_os = "windows"))]
-    Err("unsupported".into())
+    {
+        let _ = p;
+        Err("unsupported".into())
+    }
 }
 
 // ---- startup launch (autostart) ----------------------------------------------
