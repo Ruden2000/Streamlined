@@ -100,8 +100,14 @@ const Transport = {
 /* Presence is link-driven: greet a peer when its channel opens, drop it
    when the channel closes. (peerId === null means "announce broadly",
    used by the BroadcastChannel backend.) */
+function selfDevice() {
+  const d = { id: state.device.id, name: state.device.name, type: state.device.type };
+  if (state.network && state.network.pub) d.pk = state.network.pub;   // session-key handshake
+  return d;
+}
+
 function onPeerOpen(peerId) {
-  const dev = { id: state.device.id, name: state.device.name, type: state.device.type };
+  const dev = selfDevice();
   if (peerId) Transport.send({ type: "hello", _to: peerId, device: dev });
   else Transport.send({ type: "hello", device: dev });
 }
@@ -121,10 +127,15 @@ async function startNetwork(code) {
   code = code.toUpperCase();
   if (state.network && state.network.code === code) { renderAll(); return true; } // already on it
   const id = (await Crypto.sha256hex("streamlined:" + code)).slice(0, 16);
-  const key = await Crypto.deriveKey(code);
+  const key = await Crypto.deriveKey(code);           // still used for local at-rest history
+  // Throwaway keypair for this session. Peers swap public halves on greeting
+  // and derive a per-pair key, so traffic stays unreadable later even if the
+  // pairing code leaks. The private half never leaves this device.
+  const keys = await Crypto.newSessionKeys();
+  const pub = await Crypto.exportPublic(keys);
   if (presenceTimer) { clearInterval(presenceTimer); presenceTimer = null; } // clean up any prior network
   Transport.stop();
-  state.network = { code, id, key };
+  state.network = { code, id, key, keys, pub };
   await Transport.start(id);        // fetches ICE servers, then connects; peers greeted on link open
   await loadHistory();
   state.devices.clear();   // drop any previous network's roster from the UI
@@ -158,7 +169,7 @@ let graceUntil = 0;                  // suppress offline-marking right after we 
 
 function sendPing() {
   if (!state.network) return;
-  Transport.send({ type: "ping", device: { id: state.device.id, name: state.device.name, type: state.device.type } });
+  Transport.send({ type: "ping", device: selfDevice() });
 }
 function heartbeat() {
   if (!state.network) return;
@@ -184,7 +195,7 @@ function onResume() {
   Transport.resume();
   renderNetPill();
   sendPing();
-  Transport.send({ type: "hello", device: { id: state.device.id, name: state.device.name, type: state.device.type } });
+  Transport.send({ type: "hello", device: selfDevice() });
 }
 let presenceTimer = null;
 
@@ -214,10 +225,39 @@ function registerDevice(d) {
   const prev = state.devices.get(d.id) || {};
   const wasOnline = !!prev.online;
   state.devices.set(d.id, { ...prev, ...d, lastSeen: Date.now(), online: true, banned: prev.banned || false });
+  // First sight of this peer's public key (or a new one after they restarted)
+  // establishes the key this pair will actually encrypt with.
+  if (d.pk && prev.pk !== d.pk) establishSession(d.id, d.pk);
   if (!known || prev.name !== d.name || prev.type !== d.type) saveRoster();
   if (!known || !wasOnline) { renderDevices(); renderTargets(); flushOutbox(); }
 }
 function countActive() { return state.devices.size; }
+
+/* Work out the key this pair will use, plus the digits both people can compare
+   to confirm nothing is sitting in between. */
+async function establishSession(peerId, peerPub) {
+  if (!state.network || !state.network.keys) return;
+  try {
+    const priv = state.network.keys.privateKey;
+    const me = state.device.id;
+    const [sessionKey, sas] = await Promise.all([
+      Crypto.deriveSessionKey(priv, peerPub, state.network.code, me, peerId),
+      Crypto.verificationCode(priv, peerPub, state.network.code, me, peerId)
+    ]);
+    const d = state.devices.get(peerId);
+    if (!d) return;
+    d.sessionKey = sessionKey;
+    d.sas = sas;
+    renderDevices();
+  } catch (e) { console.warn("session key exchange failed", e); }
+}
+
+/* Peers running an older build never send a public key; those fall back to the
+   shared code-derived key so transfers still work across versions. */
+function keyForPeer(peerId) {
+  const d = state.devices.get(peerId);
+  return (d && d.sessionKey) || (state.network && state.network.key) || null;
+}
 
 /* ---- persistent roster: paired devices stay linked (listed) across
         restarts and offline periods, until the user leaves the network ---- */
@@ -246,7 +286,7 @@ async function handleMessage(msg) {
     case "hello":
       registerDevice(msg.device);
       // respond so the newcomer learns about us
-      Transport.send({ type: "welcome", _to: msg.device.id, device: { id: state.device.id, name: state.device.name, type: state.device.type } });
+      Transport.send({ type: "welcome", _to: msg.device.id, device: selfDevice() });
       // share who we currently know is banned
       for (const [id, d] of state.devices) if (d.banned) Transport.send({ type: "ban", _to: msg.device.id, deviceId: id });
       // bring the newcomer up to date on the synced clipboard
@@ -449,7 +489,8 @@ function onDecline(msg) {
 async function streamFile(rec) {
   const file = rec._buffer;
   if (!file) return;
-  const total = file.size, key = state.network.key;
+  const total = file.size, key = keyForPeer(rec.to);   // per-pair session key
+  if (!key) throw new Error("No encryption key for " + rec.peer);
   let offset = rec.resumeFrom || 0, yielded = 0;
   rec.status = "sending";
   try {
@@ -653,7 +694,7 @@ async function onBinaryFrame(peerId, buf) {
   const { tid, off, total, iv } = f.header;
   if (!state.incoming.has(tid) || !state.network) return;
   try {
-    const bytes = await Crypto.decryptRaw(state.network.key, b64ToBytes(iv), f.payload);
+    const bytes = await Crypto.decryptRaw(keyForPeer(peerId), b64ToBytes(iv), f.payload);
     ingestChunk(tid, off, bytes, total);
   } catch (e) { failReceive(tid, e); }
 }
@@ -662,7 +703,7 @@ async function onBinaryFrame(peerId, buf) {
 async function onChunk(msg) {
   if (!state.incoming.has(msg.tid)) return;
   try {
-    const bytes = await Crypto.decrypt(state.network.key, msg.iv, msg.ct);
+    const bytes = await Crypto.decrypt(keyForPeer(msg._from), msg.iv, msg.ct);
     ingestChunk(msg.tid, msg.off, bytes, msg.total);
   } catch (e) { failReceive(msg.tid, e); }
 }
@@ -968,10 +1009,14 @@ function renderDevices() {
     const row = el("div", "device" + (d.me ? " me" : "") + (d.banned ? " banned" : "") + (off ? " offline" : "") + (!d.me && isTrusted(d.id) ? " trusted" : ""));
     const trust = !d.me && isTrusted(d.id) ? " · trusted" : "";
     const status = (d.banned ? "⛔ Quarantined" : d.me ? "This device" : d.online ? "Online" : "Offline · still linked") + trust;
+    // Same six digits on both devices means the connection really is direct.
+    const sas = !d.me && d.online && d.sas
+      ? '<span class="sas" title="Both devices should show these digits. If they differ, something is relaying your connection.">🔒 ' + escapeHtml(d.sas) + '</span>'
+      : "";
     row.innerHTML =
       '<div class="dv-ic">' + (DEVICE_ICONS[d.type] || DEVICE_ICONS.desktop) + '</div>' +
       '<div class="dv-meta"><div class="dv-name">' + escapeHtml(d.name) + '</div>' +
-      '<div class="dv-sub">' + status + " · " + d.type + '</div></div>';
+      '<div class="dv-sub">' + status + " · " + d.type + sas + '</div></div>';
     // Trusting one device is safer than switching auto-accept on for everyone.
     if (!d.me && !d.banned) {
       const on = isTrusted(d.id);

@@ -56,11 +56,17 @@ WebSocket. The pairing QR/code carries the signaling room id. Keep the existing 
 (`offer`/`chunk`/`complete`) so app logic is untouched. Add STUN + managed TURN.
 **Outcome: two real devices on different networks can transfer.** Without this there is no product.
 
-### Phase 2 — Hardening
-- PAKE/ECDH pairing with a short verification string (replace the low-entropy 6-char-only key).
-- Forward secrecy (ephemeral session keys).
-- Backpressure via DataChannel `bufferedAmount` ✅ done; resumable/retryable transfers (todo).
-- Stream large files to disk (File System Access / native fs) instead of buffering in memory.
+### Phase 2 — Hardening ✅ DONE (v1.4.0)
+- ✅ **ECDH pairing with a short verification string** — ephemeral P-256 keypair per session, peers
+  swap public halves in the greeting, session key = HKDF(ECDH secret, salt = pairing code). The code
+  binds the exchange (so a malicious signalling server can't MITM) but is no longer the key itself.
+  Six-digit SAS shown per connected device. Peers without a public key fall back to the legacy
+  code-derived key, so older builds still interoperate.
+- ✅ **Forward secrecy** — private halves never leave memory and are regenerated each session, so
+  recorded traffic stays unreadable even if the code later leaks.
+- ✅ Backpressure via DataChannel `bufferedAmount`; ✅ resumable/retryable transfers (v1.2.0).
+- ✅ Large files no longer buffered whole in memory — chunks fold into disk-backed Blobs (v1.2.0);
+  desktop can also write straight to a chosen folder (v1.3.2).
 
 ### Phase 3 — Native shells 🟡 scaffolded
 Capacitor (Android project in `android/`, icons/splash generated) + Tauri (`src-tauri/`, icons +
